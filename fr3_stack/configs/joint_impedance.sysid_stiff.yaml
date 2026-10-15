@@ -1,0 +1,11 @@
+# Slightly stiffer joint-space impedance profile for system-identification excitation.
+#
+# Raises joint K/D relative to the conservative default while preserving the
+# default target EMA. Intended for small-amplitude system-identification runs
+# after a hold test confirms the arm is quiet at the live anchor.
+
+K_joint: [700.0, 700.0, 700.0, 700.0, 300.0, 180.0,  60.0]
+D_joint: [ 55.0,  55.0,  55.0,  55.0,  32.0,  27.0,  16.0]
+
+filter_alpha: 0.05
+use_friction: false

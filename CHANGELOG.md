@@ -10,6 +10,28 @@ in [AGENTS.md](AGENTS.md).
 ## [Unreleased]
 
 ### Changed
+- `examples/cart_sysid.py` (2026-10-14) no longer aborts on Cartesian
+  tracking error by default: `--max-position-error` / `--max-angle-error` now
+  default to 0 (off) instead of 0.03 m / 0.15 rad; pass a positive value to
+  re-enable either check. The joint-speed guard is removed entirely,
+  including `--max-joint-speed` (passing it is now an argparse error) and the
+  0.02 rad/s start/end stillness checks: the old 0.3 rad/s limit is below what a
+  scale-0.2 chirp needs on J7, and FrankaTwin reports speeds without policing
+  them. The end-of-run 5 mm / 0.03 rad anchor check and the minimum-motion
+  check are now recorded in `metadata.json.final_offset` instead of failing
+  the run: a scale-0.5 validation run that stopped 5.5 mm from the anchor
+  (friction at K 500) had been marked aborted and terminated the daemon. FrankaTwin collects sysid
+  data with no tracking abort, and at real impedance lag the old 3 cm / 0.15 rad
+  guard stopped a scale-0.2 chirp after 5 s. Peak errors are recorded in
+  `metadata.json.observed_motion.tracking_error_peak_m/_rad`. Stale-state,
+  timing and end-of-run settle checks are unchanged. No PR has
+  been opened for this change.
+- `examples/joint_sysid.py` (2026-10-14) names the failing joint and measured
+  error on tracking-guard aborts and preserves the pre-send state/target snapshot
+  in `metadata.json.guard_failure`, making multi-joint failures diagnosable
+  without weakening limits or changing controller behavior. See
+  `docs/joint-sysid.md` for recording-stop timeouts after daemon termination and
+  invalid terminal target rows. No PR has been opened for this change.
 - `AGENTS.md` and `sync.md` (2026-10-09): make the work-PC agent responsible
   for the complete SSH-based NUC update, including configured diagnostic SDKs,
   prepared launch references, identity checks and failure recovery. No NUC
@@ -48,6 +70,71 @@ in [AGENTS.md](AGENTS.md).
   updated together. No PR has been opened for this change.
 
 ### Added
+- `examples/cart_sysid.py --stage chirp-high` (2026-10-14): FrankaTwin's
+  high-band chirp (0.7 → 3 Hz, amplitudes tapered by (f0/f)^0.5) for
+  high-dynamics fit data, which FrankaTwin reports halves held-out joint error
+  when fitted together with the low band. Peak reference speed reaches
+  0.57 m/s and 2.1 rad/s at scale 0.4; larger scales are refused by the default
+  0.6 m/s / 3 rad/s reference bounds. No PR has been opened for this change.
+- `examples/cart_sysid.py` (2026-10-14) collects hold, original low-band
+  Cartesian chirp and held-out multiband references from pinned FrankaTwin
+  generators, with explicit amplitude scaling and offline preview by default.
+  The existing Cartesian controller, gains and target filtering are preserved;
+  joint/idle mode is refused and no homing, mode switch or stage progression
+  occurs. `--record` manages a unique acknowledged 1 kHz recording and captures
+  completion/errors, while faults attempt termination before recording cleanup.
+  Vendored sources retain LICENSE/NOTICE and exact SHA256 identities. See
+  `docs/joint-sysid.md`: replay/controller and CSV format differences prevent
+  treating collection as an already matched FrankaTwin fit. No PR has been
+  opened for this change.
+- `examples/joint_trajectory.py --stage twin-large` (2026-10-14) adds a
+  separately reviewed seven-joint +/-1 deg, 0.05 to 0.15 Hz chirp trial.
+  Existing velocity/acceleration/jerk, freshness and timing bounds are retained;
+  its tracking/terminal anchor window is explicitly 0.5 deg instead of 0.003 rad.
+  This allows a larger low-frequency response check after a small-signal abort
+  without modifying K/D or EMA. Amplitude, band and tracking window are printed
+  before execution; actual motion and settling still require recorded-feedback
+  review. See `configs/joint_sysid.initial.json` and `docs/joint-sysid.md`.
+  No PR has been opened for this change.
+- `examples/joint_trajectory.py --stage twin-chirp|twin-all|twin-validation`
+  (2026-10-14) adds individually reviewed, offline-by-default joint adaptations
+  of FrankaTwin's low chirp and held-out multiband designs. Seven-joint
+  phase-staggered chirps and distinct normalized per-joint tones preserve the
+  existing reference limits, controller and EMA; they are not upstream
+  Cartesian motions or hardware-validated SI datasets. Source provenance and
+  resolved waveform settings are recorded. Non-smoke stages forward `--nuc-log`
+  and `--experiment-metadata`; recording and stage progression remain separate.
+  See `configs/joint_sysid.initial.json` and `docs/joint-sysid.md`. No PR has
+  been opened for this change.
+- `examples/joint_trajectory.py` provides a short, one-stage entrypoint for the
+  initial joint campaign (`--stage hold|smoke|chirp|sequential|train|validation`).
+  Offline smoke preview is the default; `--execute` requires an explicit NUC
+  and arm ID, uses the live pose and preserves the existing guards and smoke
+  response checks. Campaign hashes are saved with diagnostics, existing output
+  directories are refused, and no mode switch, recording startup, automatic
+  progression or EMA override occurs. See `docs/joint-sysid.md`. No PR has been
+  opened for this change.
+- `configs/joint_sysid.initial.json` and `docs/joint-sysid.md` define a
+  small-range, individually reviewed joint excitation campaign: hold, J1 smoke,
+  J1/sequential chirps, and distinct multisine training/validation runs. The
+  presets reuse existing trajectory math, preserve the stiffer profile's EMA,
+  and leave reference derivative headroom. Hardware-free regression checks cover
+  duration, boundaries, joint isolation, amplitude and limits; no controller,
+  recording, mode switch or real motion is started automatically. No PR has been
+  opened for this change.
+- `examples/joint_smoke.py` provides a repeatable read-only connection/readiness
+  check and opt-in live-anchor joint sine test (default +/-0.25 degrees,
+  26 seconds, `sysid_stiff`). It reuses the joint excitation guards and logs,
+  checks observed motion/tracking/return before reporting success, and rejects
+  excursions above 0.5 degrees. Preview is the default; controller mode and
+  target filtering are preserved. See `docs/quickstart.md`.
+- `fr3_stack/configs/joint_impedance.sysid_stiff.yaml` and
+  `examples/joint_sysid.py --profile` let joint-space identification runs use
+  higher joint K/D gains while preserving the default target EMA setting. The
+  selected profile is saved in metadata so stiffer-response experiments are
+  replayable and do not silently change the base joint-impedance behavior.
+  CLI-to-wire regression tests verify profile/override settings and reject
+  unknown profiles or invalid gains before a connection is created.
 - `sync.md` and `AGENTS.md` (2026-10-09): document a separate NUC user checkout,
   Docker build access, a minimal SDK environment, and role-specific preparation.
   Pair releases from the workstation's selected source snapshot, including
@@ -180,6 +267,28 @@ in [AGENTS.md](AGENTS.md).
   now runs. ([#5](https://github.com/Robot-Dexterity-Lab/fr3_stack/pull/5))
 
 ### Fixed
+- `examples/joint_trajectory.py` defaults client logs to timestamped directories
+  under `~/fr3-client-recordings/` rather than the checkout's `recordings/`, which
+  Docker may create as root-owned. The selected path is printed; explicit
+  `--output` and existing-directory refusal remain unchanged. Permission errors
+  still fail before a robot connection, without changing daemon storage,
+  controller settings or directory ownership. See `docs/joint-sysid.md` and
+  `sync.md`. No PR has been opened for this change.
+- `docs/joint-sysid.md` and `sync.md` clarify that SSH does not copy new
+  trajectory scripts, list the example/preset dependencies to synchronize,
+  and use the NUC's existing `.venv` for diagnostics instead of system Python
+  without transport dependencies. Guarded example-only copies preserve site
+  gain profiles, SDK/image identities, active controllers and rollback files;
+  they do not require a daemon rebuild. No PR has been opened for this change.
+- `examples/joint_smoke.py` now rejects unresolvable NUC hosts and SSH
+  `user@host` targets before connecting. Read-only state timeouts identify the
+  actual state endpoint and daemon/port checks, so a login-name mix-up or a
+  prepared-but-inactive daemon does not appear as an unexplained connection
+  failure. See `docs/troubleshooting.md`.
+- `examples/joint_sysid.py` now updates the previous sent target used by its
+  tracking-error guard. Correctly following a moving reference no longer trips
+  an anchor-relative bound, and losing tracking after departure is checked
+  against the actual preceding command.
 - `fr3-stack` service commands now automatically load an installed
   `.setup/nuc-jz.env` and select the JZ Compose override, with exported `FR3_`
   values taking precedence. Bare `up` commands use the prepared image and

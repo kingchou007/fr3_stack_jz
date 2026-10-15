@@ -49,9 +49,13 @@ Shorthands: `--idle`, `--cart`, `--hybrid`.
 
 Without `--initial-cart-profile`, a freshly started `cartesian_impedance`
 daemon holds with the built-in K 200/20 until a client sends its own gains. Set
-`FR3_INITIAL_CART_PROFILE` to the container path of a profile YAML (mount it
-into the container) to boot with that profile instead, for example
-`cartesian_impedance.sysid_stiff.yaml` from `fr3_stack/configs/`.
+`FR3_INITIAL_CART_PROFILE` to a container path to boot with a profile instead.
+In JZ mode the SDK profiles are mounted read-only at `/opt/fr3-stack/profiles`,
+for example in `.setup/nuc-jz.env`:
+
+```bash
+FR3_INITIAL_CART_PROFILE=/opt/fr3-stack/profiles/cartesian_impedance.sysid_stiff.yaml
+```
 
 The daemon validates the file before connecting to the robot and refuses to
 start on an invalid profile; the boot log prints the loaded K and D.
@@ -128,6 +132,46 @@ with Robot("nuc.local") as robot:
 ```
 
 Per-call kwargs (`K=`, `D=`, `target_wrench=`, …) update an internal last-sent cache, so subsequent calls without those kwargs reuse the new values.
+
+### Repeatable small-motion check
+
+`examples/joint_smoke.py` provides an offline preview, a read-only readiness
+check, and an opt-in joint motion test. Run from the repository root:
+
+```bash
+# Preview only; no connection.
+python3 examples/joint_smoke.py
+
+# Fresh stationary joint-mode feedback; no commands sent.
+python3 examples/joint_smoke.py --check-only --host NUC_HOST
+
+# Small motion from the LIVE joint pose, then return and hold.
+python3 examples/joint_smoke.py --execute --host NUC_HOST --robot-id left
+```
+
+Replace `NUC_HOST` with the NUC's actual IP or resolvable hostname, not its SSH
+login username. A prepared image must be activated separately before state can
+arrive; the smoke client does not start the daemon.
+
+The motion preset is J1, at most +/-0.25 degrees, 0.1 Hz, 20 seconds including
+5-second fades, with 3-second holds before and after (26 seconds total).
+It uses `sysid_stiff` K/D and the profile's unchanged target filter.
+`--joint` selects one joint; `--amplitude-deg` is restricted to 0.1..0.5.
+The daemon must already be stationary in joint impedance mode, with other
+command producers stopped and the arm/hand motion volume clear. It does not
+home the robot or switch controller modes.
+
+Each preview/motion run gets a new `recordings/smoke-.../` directory. A motion
+`SMOKE PASS` requires observed excursion of at least half the selected amplitude,
+tracking error no greater than half that amplitude against the previous sent
+target, final joint error <=0.002 rad, and final speed <=0.005 rad/s.
+Stale state, motion limits, or timing faults abort through the existing
+[joint excitation lifecycle](joint-sysid.md); termination is best-effort and
+unconfirmed. The half-amplitude tracking bound is also enforced during motion.
+A stationary feedback stream cannot pass the motion test just
+because sends returned successfully. The read-only check verifies state
+readiness only, not the command path. These checks have no collision model
+and have not been validated on the physical arm.
 
 ### Pose-centric API (`Arm`)
 

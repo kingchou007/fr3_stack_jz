@@ -28,6 +28,12 @@ Q_LOWER = Q_MIN + .1 * (Q_MAX - Q_MIN)
 Q_UPPER = Q_MAX - .1 * (Q_MAX - Q_MIN)
 PREVIEW_Q = np.array([0., -.6, 0., -1.8, 0., 1.8, .7])
 COLORS = ['#2563eb', '#dc2626', '#16a34a', '#9333ea', '#ea580c', '#0891b2', '#475569']
+# Frequency design from FrankaTwin acf16009, reassigned to joints, not Cartesian axes.
+# https://github.com/tsrobcvai/frankatwin/blob/acf16009c09c99c9a2bb86050b57eb248982ba9f/python/frankatwin/excitation/multiband.py
+FRANKATWIN_TONES = (
+    (.15, .70, 1.40), (.20, .90, 1.70), (.30, 1.10, 2.00),
+    (.24, .75, 1.60), (.26, .80, 1.85), (.18, .55, 1.25), (.22, .65, 1.50),
+)
 
 
 @dataclass(frozen=True)
@@ -47,10 +53,13 @@ class Plan:
     max_velocity: float = .1
     max_acceleration: float = .3
     max_jerk: float = 2.0
+    chirp_layout: str = 'sequential'
+    tone_profile: str = 'custom'
 
     @property
     def segments(self):
-        return 1 if self.mode in ('hold', 'multisine') else len(self.joints)
+        return 1 if (self.mode in ('hold', 'multisine') or
+                     self.mode == 'chirp' and self.chirp_layout == 'simultaneous') else len(self.joints)
 
     @property
     def total(self):
@@ -64,6 +73,17 @@ class Plan:
             raise ValueError('all trajectory settings must be finite')
         if self.mode not in ('hold', 'sine', 'chirp', 'multisine'):
             raise ValueError('unknown trajectory mode')
+        if self.chirp_layout not in ('sequential', 'simultaneous'):
+            raise ValueError('unknown chirp layout')
+        if self.chirp_layout != 'sequential' and self.mode != 'chirp':
+            raise ValueError('simultaneous chirp layout requires chirp mode')
+        if self.tone_profile not in ('custom', 'frankatwin'):
+            raise ValueError('unknown tone profile')
+        if self.tone_profile == 'frankatwin':
+            if self.mode != 'multisine':
+                raise ValueError('frankatwin tone profile requires multisine mode')
+            if self.tones != (.1, .23, .41) or self.seed != 0:
+                raise ValueError('frankatwin tone profile fixes tones/phases; omit --tones and --seed')
         if not self.joints or len(set(self.joints)) != len(self.joints) or any(j not in range(1, 8) for j in self.joints):
             raise ValueError('joints must be unique indices in 1..7')
         if self.amplitude_deg <= 0 or self.seconds <= 0 or self.ramp <= 0 or 2 * self.ramp > self.seconds:
@@ -78,7 +98,9 @@ class Plan:
             raise ValueError('command rate must be in 10..200 Hz')
         if self.ramp * self.rate < 5:
             raise ValueError('each ramp must span at least five command periods')
-        top = max(self.tones) if self.mode == 'multisine' else self.f1 if self.mode == 'chirp' else self.f0
+        top = (max(max(FRANKATWIN_TONES[j - 1]) for j in self.joints)
+               if self.tone_profile == 'frankatwin' else max(self.tones)
+               if self.mode == 'multisine' else self.f1 if self.mode == 'chirp' else self.f0)
         if self.mode != 'hold' and top > self.rate / 20:
             raise ValueError('use at least 20 command samples per highest-frequency cycle')
         if min(self.max_velocity, self.max_acceleration, self.max_jerk) <= 0:
@@ -108,6 +130,35 @@ class Trajectory:
         self.plan = plan
         self.phases = np.random.default_rng(plan.seed).uniform(0, 2 * np.pi, (7, len(plan.tones)))
 
+    def joint_tones(self, joint):
+        """Resolve actual frequencies, normalized weights and phases for one joint."""
+        p = self.plan
+        if p.mode == 'multisine':
+            if p.tone_profile == 'frankatwin':
+                frequencies = np.asarray(FRANKATWIN_TONES[joint - 1])
+                weights = np.minimum(1., .35 / frequencies)
+                phases = ((joint - 1) * np.pi / 3 + np.arange(3) * np.pi / 2) % (2 * np.pi)
+            else:
+                frequencies = np.asarray(p.tones)
+                weights = 1 / frequencies
+                phases = self.phases[joint - 1]
+            weights = weights / weights.sum()
+        else:
+            frequencies, weights = np.array([p.f0]), np.ones(1)
+            phase = 2 * np.pi * (joint - 1) / 7 if p.chirp_layout == 'simultaneous' else 0.
+            phases = np.array([phase])
+        return frequencies, weights, phases
+
+    def describe(self):
+        joints = {}
+        if self.plan.mode != 'hold':
+            for joint in self.plan.joints:
+                frequencies, weights, phases = self.joint_tones(joint)
+                joints[str(joint)] = dict(frequencies_hz=frequencies.tolist(),
+                                         normalized_weights=weights.tolist(), phases_rad=phases.tolist())
+        return dict(chirp_layout=self.plan.chirp_layout, tone_profile=self.plan.tone_profile,
+                    amplitude_semantics='Peak offset bound; tone weights sum to one', joints=joints)
+
     def evaluate(self, times):
         """Return offsets, velocity, acceleration, jerk, each shaped (N, 7).
 
@@ -126,16 +177,14 @@ class Trajectory:
                 continue
             s = t[active] - start
             w, dw, ddw, dddw = envelope(s, p.seconds, p.ramp)
-            joints = p.joints if p.mode == 'multisine' else (p.joints[segment],)
+            simultaneous = p.mode == 'multisine' or p.mode == 'chirp' and p.chirp_layout == 'simultaneous'
+            joints = p.joints if simultaneous else (p.joints[segment],)
             for joint in joints:
                 y = [np.zeros_like(s) for _ in range(4)]
-                tones = p.tones if p.mode == 'multisine' else (p.f0,)
                 # Normalize the SUM of tone amplitudes, not each tone, to A.
-                weights = 1 / np.asarray(tones)
-                weights /= weights.sum()
-                for k, (frequency, weight) in enumerate(zip(tones, weights)):
+                tones, weights, phases = self.joint_tones(joint)
+                for frequency, weight, phase0 in zip(tones, weights, phases):
                     sweep = (p.f1 - p.f0) / p.seconds if p.mode == 'chirp' else 0.
-                    phase0 = self.phases[joint - 1, k] if p.mode == 'multisine' else 0.
                     phase = 2 * np.pi * (frequency * s + .5 * sweep * s**2) + phase0
                     omega = 2 * np.pi * (frequency + sweep * s)
                     beta = 2 * np.pi * sweep
@@ -253,14 +302,27 @@ def stream(robot, trajectory, q0, gains, writer, metadata, *, stale_after=.2,
         if lateness > max_lateness:
             raise RuntimeError(f'command loop missed deadline by {lateness:.3f} s')
         state = healthy_state(snapshot, now, stale_after=stale_after, max_velocity=p.max_velocity)
-        if np.max(np.abs(state.q - last_target)) > tracking_error:
-            raise RuntimeError('joint tracking error exceeds configured bound')
+        tracking_errors = np.abs(state.q - last_target)
+        if np.max(tracking_errors) > tracking_error:
+            joint = int(np.argmax(tracking_errors))
+            metadata['guard_failure'] = dict(
+                kind='tracking_error', joint=joint + 1,
+                error_rad=float(tracking_errors[joint]), limit_rad=tracking_error,
+                trajectory_t_s=now - origin, state_daemon_timestamp=state.timestamp,
+                state_age_s=now - state.received_at,
+                measured_q_rad=np.asarray(state.q).tolist(),
+                previous_target_q_rad=last_target.tolist(), errors_rad=tracking_errors.tolist())
+            raise RuntimeError('joint tracking error exceeds configured bound: '
+                               f'J{joint + 1} error={tracking_errors[joint]:.6g} rad '
+                               f'({np.rad2deg(tracking_errors[joint]):.6g} deg), '
+                               f'limit={tracking_error:.6g} rad')
         elapsed = min(now - origin, p.total)
         target = q0 + trajectory.evaluate([elapsed])[0][0]
         # This is an attempted command; send completion is not a daemon ack.
         metadata['motion_command_attempted'] = True
         robot.send_joint_impedance(target, **gains)
         sent_at = clock()
+        last_target = target.copy()
         metadata['commands_sent'] = seq + 1
         writer.writerow([seq, elapsed, now, sent_at, state.timestamp, state.received_at,
                          lateness, *target, *state.q, *state.dq])
@@ -343,9 +405,9 @@ def parser():
     p.add_argument('--state-port', type=int, default=5556)
     p.add_argument('--robot-id', help='recording identifier, e.g. left or right; required for execution')
     p.add_argument('--mode', choices=['hold', 'sine', 'chirp', 'multisine'], default='sine')
-    p.add_argument('--joints', type=int, nargs='+', default=[1], help='1-based; sine/chirp run sequentially')
+    p.add_argument('--joints', type=int, nargs='+', default=[1], help='1-based; sine is sequential; chirp layout is configurable')
     p.add_argument('--amplitude-deg', type=float, default=1., help='peak offset bound per selected joint, not peak-to-peak')
-    p.add_argument('--seconds', type=float, default=20., help='duration per joint for sine/chirp; includes ramps')
+    p.add_argument('--seconds', type=float, default=20., help='segment duration including ramps; simultaneous modes use one segment')
     p.add_argument('--ramp', type=float, default=5., help='fade-in and fade-out duration each')
     p.add_argument('--hold', type=float, default=2., help='initial and final holding duration each')
     p.add_argument('--gap', type=float, default=2., help='hold between sequential joint segments')
@@ -353,6 +415,10 @@ def parser():
     p.add_argument('--f1', type=float, default=.5, help='chirp final frequency, Hz')
     p.add_argument('--tones', type=float, nargs='+', default=[.1, .23, .41], help='multisine frequencies, Hz')
     p.add_argument('--seed', type=int, default=0, help='reproducible multisine phases')
+    p.add_argument('--chirp-layout', choices=['sequential', 'simultaneous'], default='sequential',
+                   help='simultaneous chirp uses fixed 2*pi/7 phase spacing by joint index')
+    p.add_argument('--tone-profile', choices=['custom', 'frankatwin'], default='custom',
+                   help='frankatwin: fixed distinct per-joint tones/phases, normalized to the peak bound')
     p.add_argument('--rate', type=float, default=60., help='workstation target rate; NOT the NUC logging rate')
     p.add_argument('--q0-rad', type=float, nargs=7, help='offline preview anchor only; execution always uses live q')
     p.add_argument('--max-velocity', type=float, default=.1, help='reference and measured joint speed limit, rad/s')
@@ -361,6 +427,7 @@ def parser():
     p.add_argument('--tracking-error', type=float, default=.05, help='measured vs previous sent target bound, rad')
     p.add_argument('--stale-after', type=float, default=.2, help='maximum state reception age, seconds')
     p.add_argument('--max-lateness', type=float, default=.05, help='maximum loop/send pause, seconds')
+    p.add_argument('--profile', help='joint_impedance profile name, e.g. sysid_stiff; --kp/--kd/--filter-alpha override it')
     p.add_argument('--kp', type=float, nargs=7, help='otherwise resolved from joint_impedance.yaml')
     p.add_argument('--kd', type=float, nargs=7, help='otherwise resolved from joint_impedance.yaml')
     p.add_argument('--filter-alpha', type=float, help='otherwise resolved from joint_impedance.yaml')
@@ -369,6 +436,22 @@ def parser():
     p.add_argument('--nuc-log', help='reference to separately collected NUC log; existence/content are NOT verified')
     p.add_argument('--output', type=Path, help='new directory; existing directories are never overwritten')
     return p
+
+
+def resolve_joint_gains(args):
+    """Resolve execution gains without importing transport in preview mode."""
+    from fr3_stack.config import load_controller_config
+    from fr3_stack.wire import flat_joint
+    defaults = flat_joint(load_controller_config('joint_impedance', args.profile))
+    gains = {
+        'K_joint': vector(args.kp if args.kp is not None else defaults['K_joint'], 'K_joint').tolist(),
+        'D_joint': vector(args.kd if args.kd is not None else defaults['D_joint'], 'D_joint').tolist(),
+        'filter_alpha': args.filter_alpha if args.filter_alpha is not None else defaults['filter_alpha'],
+        'use_friction': False,
+    }
+    if min(gains['K_joint']) <= 0 or min(gains['D_joint']) <= 0 or not 0 < gains['filter_alpha'] <= 1:
+        raise ValueError('positive K/D and filter_alpha in (0, 1] required')
+    return gains
 
 
 def main(argv=None):
@@ -399,8 +482,10 @@ def main(argv=None):
             'script_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'robot_id': args.robot_id, 'host': args.host, 'cmd_port': args.cmd_port,
             'state_port': args.state_port, 'plan': asdict(trajectory.plan),
+            'reference_waveform': trajectory.describe(),
             'experiment': experiment, 'nuc_log_reference': args.nuc_log,
             'nuc_log_verified': False, 'sysid_ready': False,
+            'joint_impedance_profile': args.profile,
             'data_semantics': 'Client send attempts and latest PUB state sampled before each send; no daemon acknowledgement, no per-tick torque, no effective filtered target. Not a 1 kHz sysid recording.',
             'guard_settings': {name: getattr(args, name) for name in ('stale_after', 'tracking_error', 'max_lateness')},
             'commands_sent': 0, 'motion_command_attempted': False,
@@ -419,17 +504,7 @@ def main(argv=None):
         # Keep offline operation independent of pycapnp and of Robot creation.
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from fr3_stack.robot import Robot
-        from fr3_stack.config import load_controller_config
-        from fr3_stack.wire import flat_joint
-        defaults = flat_joint(load_controller_config('joint_impedance'))
-        gains = {
-            'K_joint': vector(args.kp if args.kp is not None else defaults['K_joint'], 'K_joint').tolist(),
-            'D_joint': vector(args.kd if args.kd is not None else defaults['D_joint'], 'D_joint').tolist(),
-            'filter_alpha': args.filter_alpha if args.filter_alpha is not None else defaults['filter_alpha'],
-            'use_friction': False,
-        }
-        if min(gains['K_joint']) <= 0 or min(gains['D_joint']) <= 0 or not 0 < gains['filter_alpha'] <= 1:
-            raise ValueError('positive K/D and filter_alpha in (0, 1] required')
+        gains = resolve_joint_gains(args)
         metadata['commanded_controller_settings'] = gains
         metadata['controller_settings_acknowledged'] = False
         # SIGTERM follows the same partial-log / termination path as Ctrl-C.

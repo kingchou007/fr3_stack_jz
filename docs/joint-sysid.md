@@ -1,5 +1,9 @@
 # Joint excitation and recording
 
+For the selected Cartesian route using FrankaTwin's original reference
+generators, see [Cartesian FrankaTwin collection](#cartesian-frankatwin-collection)
+below. Joint excitation remains available; it is not the same reference path.
+
 `examples/joint_sysid.py` generates joint-position references and can send them
 to **one existing fr3-stack daemon in joint impedance mode**. It supports a
 hold, sequential single-joint sine/chirp segments, and simultaneous multisine
@@ -7,6 +11,11 @@ excitation. It does not control XHand. Keep the hand in a fixed, recorded pose.
 
 This is a trajectory/collection client, not a complete FrankaTwin identification
 pipeline. The simulation repository stays independent and consumes files.
+
+For a repeatable connection and small-motion check before data collection,
+use `examples/joint_smoke.py`; see the
+[quickstart preset](quickstart.md#repeatable-small-motion-check). It uses the
+same trajectory, feedback guards, and fault lifecycle with a smaller excursion.
 
 ## Adopted identification route and existing interface
 
@@ -61,7 +70,307 @@ Execution never moves to this illustrative pose or accepts a preview anchor.
 Each output directory must be new; omit `--output` for a timestamped directory
 under `recordings/`. Keep generated recordings out of commits.
 
-## First real run
+## Initial small-range campaign
+
+`configs/joint_sysid.initial.json` specifies a staged pilot using the existing
+trajectory generator. `examples/joint_trajectory.py` previews or executes exactly
+one selected stage; it never automatically progresses through the campaign.
+All amplitudes are peak offsets about each run's live anchor, not peak-to-peak
+angles. Keep `sysid_stiff` and its EMA unchanged throughout the campaign.
+
+| Stage | Reference | Peak offset | Frequency | Total time |
+| --- | --- | --- | --- | --- |
+| Hold | Live anchor only | 0 | None | 20 s |
+| Smoke | J1 sine | 0.25 deg | 0.1 Hz | 26 s |
+| Pilot | J1 chirp | 0.4 deg | 0.1 to 0.4 Hz | 46 s |
+| Sequential | J1 through J7, one moving joint at a time | 0.4 deg | 0.1 to 0.4 Hz | 304 s |
+| Training | Simultaneous multisine, seed 0 | At most 0.5 deg per joint | 0.1, 0.23, 0.37 Hz | 66 s |
+| Validation | Simultaneous multisine, seed 101 | At most 0.5 deg per joint | 0.13, 0.29, 0.43 Hz | 66 s |
+
+The common initial/final holds are 3 s; sequential segments have 3 s gaps.
+The chirp includes 6 s fades in each 40 s segment. Multisine includes 8 s fades
+in its 60 s excitation. Seventh-order envelopes bring offset and the first
+three reference derivatives to zero at every boundary. These reference choices
+follow the smooth-start/end principle in the
+[official FCI requirements](https://frankarobotics.github.io/docs/robot_specifications.html),
+but this stack uses torque control: reference checks do not certify actual
+robot torque, motion derivatives, collision clearance, or controller stability.
+
+Except for the stricter smoke preset, experiment bounds are 0.02 rad/s,
+0.08 rad/s^2, and 0.6 rad/s^3. The designed peaks leave at least 20% reference
+derivative headroom against these bounds in a 1 kHz offline check. Runtime
+guards use state age 0.1 s, previous-target tracking error 0.003 rad, and
+loop/send pause 0.05 s. Use the smoke wrapper for its additional observed-motion
+and final-settling checks.
+
+Use the one-stage script from the workstation. With no flags it previews the
+J1 smoke preset without importing transport or connecting to the NUC:
+
+```bash
+python3 examples/joint_trajectory.py
+python3 examples/joint_trajectory.py --stage chirp
+```
+
+The script runs on the machine where these files are installed; SSH changes
+that machine, it does not transfer the workstation's checkout. If the NUC
+reports a missing `examples/joint_trajectory.py`, synchronize the entrypoint,
+`joint_smoke.py`, `joint_sysid.py` and `configs/joint_sysid.initial.json` using
+the guarded example-only procedure in the repository-root `sync.md`. Prefer workstation
+execution so the NUC remains dedicated to control.
+
+For diagnostics from an already synchronized NUC checkout, use its existing SDK
+environment, not an unconfigured system Python. With the standard `.venv`:
+
+```bash
+.venv/bin/python examples/joint_trajectory.py --help
+.venv/bin/python examples/joint_trajectory.py --stage hold --dry-run
+```
+
+These commands send no motion. A separately reviewed local live run uses the
+same interpreter with `--execute --host 127.0.0.1 --robot-id ARM_ID`; it must
+not run concurrently with a workstation command producer. Review the profile
+on the execution machine: two files named `sysid_stiff` may contain different
+K/D values. Example synchronization preserves existing site profiles and never
+changes an installed SDK, gain file, controller mode or running daemon image.
+
+`--stage` accepts `hold`, `smoke` (default), `chirp`, `sequential`, `train`,
+and `validation`. `--joint 1..7` is supported only for smoke/chirp; the other
+stages keep their designed joint selection. Omit `--output` for a new timestamped
+directory under `~/fr3-client-recordings/`, independent of the current working
+directory. This keeps client diagnostics separate from Docker's recording
+mount, which may be root-owned. An explicit `--output` must be a new directory
+under a writable parent; it is never silently redirected. Do not run the client
+with sudo or change daemon recording permissions to work around a client log
+error. Directory creation failure occurs before any robot connection or command.
+The lower-level `joint_sysid.py` and `joint_smoke.py` defaults remain under
+`recordings/`; use their `--output` option when that directory is not writable.
+The one-stage script prints the selected log directory,
+the stage's human review prerequisite and records campaign/entrypoint hashes
+in `metadata.json`; it does not claim that prerequisite has been verified.
+
+After independently arranging a stationary joint-mode daemon and reviewing the
+stage, opt into one supervised run:
+
+```bash
+python3 examples/joint_trajectory.py --stage hold --execute \
+  --host NUC_HOST --robot-id ARM_ID
+python3 examples/joint_trajectory.py --stage smoke --execute \
+  --host NUC_HOST --robot-id ARM_ID
+```
+
+Run and review each stage separately. The smoke stage delegates to
+`joint_smoke.py`, retaining its observed-motion and final-settling checks.
+Execution rejects `idle`/gravity-compensation feedback without sending commands;
+the script neither starts nor switches a controller. Successful completion
+leaves the daemon holding the live anchor. Faults during streaming retain the
+existing best-effort termination behavior, not a guaranteed hardware stop.
+No controller math or target EMA is changed; the campaign selects `sysid_stiff`.
+It does not start 1 kHz recording, and client diagnostics are not fit-ready data.
+
+For a pose-specific preview or extra experiment metadata/NUC-log references,
+use the lower-level generator. For example, preview the J1 pilot:
+
+```bash
+python3 examples/joint_sysid.py --dry-run --profile sysid_stiff \
+  --mode chirp --joints 1 --amplitude-deg 0.4 --f0 0.1 --f1 0.4 \
+  --seconds 40 --ramp 6 --hold 3 --gap 3 --rate 60 \
+  --max-velocity 0.02 --max-acceleration 0.08 --max-jerk 0.6 \
+  --tracking-error 0.003 --stale-after 0.1 --max-lateness 0.05
+```
+
+Add seven measured values through `--q0-rad` for a pose-specific preview;
+otherwise its anchor is illustrative. A saved preview anchor is never a homing
+target. Before real motion, independently arrange a stationary `joint` daemon,
+check the payload and full arm/hand swept space, and progress through hold,
+smoke and J1 pilot before considering the later stages. Do not restart or switch
+an active `idle` daemon merely to generate previews.
+
+For a supervised pilot, replace `--dry-run` with
+`--execute --host NUC_HOST --robot-id ARM_ID`, omit `--q0-rad`, and refer to a
+separately started 1 kHz recording with `--nuc-log`. Each stage needs its own
+review and recording ID; this JSON does not start recording or enforce its
+human review gates. See [Recording](recording.md).
+
+Small, low-frequency motion is an initial response/collection experiment,
+not proof that inertia, friction, coupling or millisecond delay are identifiable.
+Expand pose, amplitude or bandwidth only after examining actual tracking,
+torque and 1 kHz data quality. Keep the validation run out of optimizer fitting.
+
+## FrankaTwin-inspired joint trial
+
+The reviewed source is [FrankaTwin acf16009](https://github.com/tsrobcvai/frankatwin/tree/acf16009c09c99c9a2bb86050b57eb248982ba9f/python/frankatwin/excitation).
+These presets follow its low-band chirp / held-out multiband design, **not** its
+Cartesian references, controller, gain values or collision configuration.
+They retain this stack's C3 fades, site `sysid_stiff` and EMA. The larger trial
+changes only its reference and explicit tracking window; other guards remain.
+No upstream package or new runtime dependency is required.
+
+| Stage | Selected joints | Peak bound | Frequencies | Total |
+| --- | --- | --- | --- | --- |
+| `twin-chirp` | J1, or `--joint 1..7` | 0.2 deg | 0.1 to 0.7 Hz | 46 s |
+| `twin-all` | J1 through J7 simultaneously | 0.2 deg each | 0.1 to 0.7 Hz | 46 s |
+| `twin-validation` | J1 through J7 simultaneously | 0.08 deg each | Three distinct tones per joint, 0.15 to 2 Hz | 66 s |
+| `twin-large` | J1 through J7 simultaneously | 1 deg each | 0.05 to 0.15 Hz | 46 s |
+
+The chirp uses fixed phase offsets `2*pi*(joint_index-1)/7`, independent of
+selection. The held-out tone table follows source axis order x/y/z/rx/ry/yaw/roll
+reassigned to J1/J2/J3/J4/J5/J6/J7; this is a frequency assignment, not an IK
+conversion or physical Cartesian-axis mapping. Relative weights `min(1, 0.35/f)`
+are normalized to sum to one, unlike upstream's unnormalized amplitude scales.
+Phases follow its axis/band stagger. Actual frequencies, weights and phases are
+recorded in `reference_waveform`; source revision and adaptations are saved in
+campaign metadata. Validation is intentionally smaller to preserve the existing
+derivative limits at higher frequencies. These are collection trials, not proof
+of identifiability or stability. No 0.7 to 3 Hz high chirp is enabled.
+
+`twin-large` is a larger/slower excitation trial after analysing a small-signal
+abort, not a high-band SI replacement. It retains 0.02 rad/s, 0.08 rad/s^2 and
+0.6 rad/s^3 limits, state-age and scheduling guards, but explicitly changes the
+previous-target tracking window from 0.003 rad to 0.00872665 rad (0.5 deg).
+That window is half the reference peak bound, not a disabled tracking check:
+a joint that remains stationary through a 1 deg peak still aborts. The same
+tracking window applies to terminal return-to-anchor checks; it does not prove
+a 0.003 rad return accuracy. Confirm actual excursion and settling from the
+1 kHz recording before claiming successful excitation. No K/D, EMA, torque-rate,
+collision or firmware settings are changed. Review the larger swept volume
+before execution. The entrypoint prints amplitude, tracking window and chirp
+band explicitly for operator review.
+
+Preview each stage without a robot connection:
+
+```bash
+python3 examples/joint_trajectory.py --stage twin-all --dry-run
+python3 examples/joint_trajectory.py --stage twin-validation --dry-run
+python3 examples/joint_trajectory.py --stage twin-large --dry-run
+```
+
+After a current-session hold/smoke check and inspection of the combined arm/hand
+swept volume, run exactly one supervised stage with
+`--execute --host NUC_HOST --robot-id ARM_ID`. If individual joints have not been
+reviewed, use `twin-chirp --joint J` first. A completed all-joint low chirp is a
+prerequisite for separately reviewing the higher-frequency validation stage;
+there is no automatic progression. Start 1 kHz recording separately before
+motion and stop it after the stage, including on failure. The wrapper now
+forwards `--nuc-log` and `--experiment-metadata` to the core for non-smoke stages;
+these references do not start or verify a recording. Normal completion leaves
+joint hold active. Existing local stop procedures remain necessary.
+
+The core also exposes `--chirp-layout simultaneous` and
+`--tone-profile frankatwin`; sequential chirps and custom multisine are unchanged
+defaults. The fixed tone profile rejects custom `--tones` or a nonzero `--seed`.
+The presets use 50 Hz targets and require independent 1 kHz daemon logs.
+
+## Cartesian FrankaTwin collection
+
+`examples/cart_sysid.py` calls the unmodified, Apache-2.0 licensed FrankaTwin
+`chirp.py` and `multiband.py` from revision
+`acf16009c09c99c9a2bb86050b57eb248982ba9f`. Sources, SHA256 identities, LICENSE
+and NOTICE are in `examples/_frankatwin_reference/`. It does not turn the
+references into joint-space sine waves. A fixed endpoint is supplied to every
+evaluation so upstream's grid-dependent duration does not change during live
+single-sample streaming.
+
+| Stage | Original excitation | Excitation time | With default holds |
+| --- | --- | --- | --- |
+| `hold` | Live pose only | 10 s | 14 s |
+| `chirp` | Six Cartesian DOFs, 0.1 to 0.7 Hz, original phases and 2/3 s linear ramps | 8 s | 12 s |
+| `validation` | Original held-out multiband tones and 2/2 s half-cosine ramps | 12 s | 16 s |
+
+`--scale` multiplies all translation and rotation amplitudes, not frequencies,
+phases or duration. Default 0.1 gives chirp position scales 1/1/1.5 cm and
+rotation-vector component scales 0.05/0.025/0.05 rad. At `--scale 1` they are
+the original 10/10/15 cm and 0.5/0.25/0.5 rad. Multiband amplitudes are upstream
+tone scales, not per-axis peak bounds. Full scale is not hardware-approved for
+an XHand or arbitrary starting pose. This client never homes the robot.
+
+Preview, including original full-scale references, without transport imports:
+
+```bash
+python3 examples/cart_sysid.py --stage chirp --scale 1 --dry-run
+python3 examples/cart_sysid.py --stage validation --scale 1 --dry-run
+```
+
+Existing directories are refused. Default output is a new directory under
+`~/fr3-client-recordings/`. Optional `--anchor-pos` and `--anchor-quat-xyzw` are
+preview-only; execution anchors at the measured live pose. `reference.csv`,
+`preview.svg` and metadata preserve the exact reference/provenance. Original
+linear ramps have velocity discontinuities; speed sampling is not a jerk,
+joint-limit, collision, torque or stability certificate.
+
+The daemon must already be healthy and stationary in `cartesian_impedance`.
+An `idle` or joint daemon is rejected before recording or motion; the script
+never changes mode. Controller activation is a separately supervised task.
+Review Desk payload, fixed XHand pose, full swept volume and local stop first.
+Only one command producer may run. After arranging Cartesian mode, review and
+run the stages separately:
+
+```bash
+python3 examples/cart_sysid.py --stage hold --execute --record \
+  --host NUC_HOST --robot-id ARM_ID
+python3 examples/cart_sysid.py --stage chirp --scale 0.1 --execute --record \
+  --host NUC_HOST --robot-id ARM_ID
+# Optional high-dynamics fit run: FrankaTwin's high band, 0.7 -> 3 Hz with
+# amplitudes tapered by (f0/f)^0.5. Scale <= 0.4 stays within the default
+# 0.6 m/s / 3 rad/s reference-speed bounds.
+python3 examples/cart_sysid.py --stage chirp-high --scale 0.2 --execute --record \
+  --host NUC_HOST --robot-id ARM_ID
+# Independently reviewed and reserved from fitting, never auto-started:
+python3 examples/cart_sysid.py --stage validation --scale 0.1 --execute --record \
+  --host NUC_HOST --robot-id ARM_ID
+```
+
+The pose-tracking guard is off by default. As in FrankaTwin
+(`error_delta_pos 0`), impedance lag is expected data: the client records the
+peak position/angle error against the previous sent target in
+`metadata.json.observed_motion`. Pass `--max-position-error METERS` and/or
+`--max-angle-error RAD` to abort when exceeded (0 keeps a check off); size them
+well above the expected lag. Joint speed is never checked, as in FrankaTwin
+(a scale-0.2 chirp already needs ~0.3 rad/s on J7), and there is no stillness
+requirement at the start or end of a run.
+Runaway protection is the daemon's per-joint torque clamp and slew limit, and the libfranka collision
+reflex and joint limits; the swept volume and local stop remain the operator's.
+
+At the default Cartesian gains (K 200/20) the arm lags the chirp reference by
+roughly 300-500 ms. Add `--profile sysid_stiff` (`fr3_stack/configs/cartesian_impedance.sysid_stiff.yaml`)
+for FrankaTwin's held-out translation gain, K 500 with D = 2·√K. Rotation uses
+K 20 with damping lowered to 5 (20/9 still excited a transient ~31 Hz J7
+oscillation at scale 0.4), and the nullspace stabilizer and target
+interpolation/EMA stay on: with FrankaTwin's rotational 30/10.95, this FR3 + XHand oscillated at
+25 Hz, dominated by J7 (~1 rad/s, ~10 Nm), once J7 moved faster than about
+0.1 rad/s, with or without the nullspace term and smoothing. Collect fit and
+held-out runs with the same profile and pass the same gains to the simulator
+replay; stiffer gains also push harder on contact.
+
+With `--record`, the client starts an acknowledged unique 1 kHz log at
+`/recordings/<run-id>.csv` before the first target. It closes that same recording
+after normal completion and records the stop counters; a failed/incomplete
+recording returns failure even when the reference finished. Runtime motion
+faults attempt termination immediately before recording cleanup, never delay
+termination to wait for a recording RPC. Stop timeouts remain unconfirmed:
+inspect writer completion and the preserved CSV. No automatic controller
+restart occurs. Without `--record`, client files alone are not a 1 kHz dataset.
+
+The selected existing Cartesian profile is resolved and sent explicitly,
+including K/D, nullspace, clipping, friction, EMA and dispatcher interpolation.
+There are no EMA or gain override flags. A nonzero configured feedforward
+wrench is refused. Site YAML/daemon settings are not rewritten. The current
+stack uses SO(3) log error, EMA/SLERP, optional LERP, nullspace and Coriolis;
+these differ from FrankaTwin's simulated pure task-PD controller. Keeping the
+original trajectory does not make the controllers or CSV formats identical.
+Raw CSV v2 lacks applied Cartesian gains and filtered pose targets; metadata
+records commanded settings as unacknowledged. A matched replay/controller and
+portable export are still required before fitting. `sysid_ready` remains false.
+
+Default sampled-feedback guards are state age 0.1 s and loop/send pause
+0.05 s; position and orientation error checks are off unless set, and joint
+speed is not checked.
+The final offset from the anchor and whether enough motion was observed are
+recorded in `metadata.json.final_offset`, not enforced: at K 500 joint friction
+leaves a few-millimetre static offset after a valid run. These are experiment
+settings, not robot limits. Normal completion leaves Cartesian hold
+active; network termination is not a hardware emergency stop or NUC watchdog.
+
+## First real joint run
 
 Confirm the installed payload in Desk and inspect the full arm/hand motion
 volume at the intended starting pose. The script checks joint ranges, but has
@@ -88,12 +397,31 @@ after saving its preview and refuses to start if the arm has moved more than
 0.002 rad while preparing. It does not reset or home the robot.
 
 It explicitly sends K/D and target-filter settings resolved from the installed
-`joint_impedance.yaml` on every command; `--kp`, `--kd`, and `--filter-alpha`
-override them. Defaults are therefore **configuration dependent**. Friction
-compensation is explicitly disabled for these experiments. Review the selected
-gains before execution; no gain ramp is implemented. The script neither reads
-nor changes Desk's payload or collision settings. A client send is not an
-acknowledgement that the NUC applied those settings.
+`joint_impedance.yaml` on every command; `--profile`, `--kp`, `--kd`, and
+`--filter-alpha` override them. Defaults are therefore **configuration
+dependent**. Friction compensation is explicitly disabled for these experiments.
+Review the selected gains before execution; no gain ramp is implemented. The
+script neither reads nor changes Desk's payload or collision settings. A client
+send is not an acknowledgement that the NUC applied those settings.
+
+For stiffer joint-level response during small-amplitude identification, use the
+bundled higher-gain joint profile:
+
+```bash
+uv run python examples/joint_sysid.py --execute --host NUC_HOST \
+  --robot-id left --profile sysid_stiff --mode sine --joints 1 \
+  --amplitude-deg 1 --f0 0.1
+```
+
+`joint_impedance.sysid_stiff.yaml` raises K/D while keeping the default target
+EMA setting. If tracking is still too soft after a hold run and a low-frequency
+sine, raise `--kp` / `--kd` in small, recorded steps and keep the 1 kHz recorder
+active.
+
+Hardware-free regression tests exercise `--profile sysid_stiff` through the CLI,
+verify the transmitted K/D/filter settings and execution metadata with a fake
+daemon, and check that unknown profiles or invalid gains fail before connection.
+This does not establish stability or a faster response on a physical arm.
 
 Normal completion returns the reference smoothly to the starting joint pose,
 holds, and leaves the NUC holding that pose in joint impedance after Python
@@ -164,6 +492,16 @@ times and daemon timestamps are separate clocks; no clock synchronization is
 claimed. Failed sends might still have reached the daemon and are recorded as
 an aborted run, not assumed absent from the real motion. CSV output contains
 no per-tick torque or effective filtered target.
+
+On tracking-guard failure, the exception names the worst joint, error and limit.
+`metadata.json` saves `guard_failure` with the failing measured snapshot, previous
+target, seven errors, state age and trajectory time before another command is
+sent. This does not relax the guard or confirm termination. A termination can
+close the daemon's recording service before a subsequent recording `stop` RPC;
+that timeout is an unconfirmed RPC result, not proof of lost data. Check service
+exit, daemon writer completion and the on-disk CSV without restarting control
+just to obtain an acknowledgement. Exclude rows with `joint_target_valid=0`
+from target/error analysis; an end-of-control row can contain zero placeholders.
 
 **These files are not a 1 kHz system-identification dataset.** Metadata always
 sets `sysid_ready=false` and `nuc_log_verified=false`. `--nuc-log` only records

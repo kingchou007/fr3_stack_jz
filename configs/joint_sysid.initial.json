@@ -1,0 +1,201 @@
+{
+  "schema": "fr3_joint_trajectory_campaign/v1",
+  "purpose": "Small-range pilot excitation, not a guaranteed identifiable dynamics dataset",
+  "profile": "sysid_stiff",
+  "filter_policy": "Keep the profile EMA unchanged; no filter-alpha override",
+  "required_controller": "joint_impedance",
+  "execution_policy": "Review each stage independently; no automatic progression or mode switching",
+  "reference_designs": {
+    "frankatwin_joint": {
+      "repository": "https://github.com/tsrobcvai/frankatwin",
+      "revision": "acf16009c09c99c9a2bb86050b57eb248982ba9f",
+      "source_paths": ["python/frankatwin/excitation/chirp.py", "python/frankatwin/excitation/multiband.py"],
+      "adaptations": [
+        "Joint-space references, not Cartesian references or inverse kinematics",
+        "Seven-joint chirp phase spacing 2*pi/7 instead of six-axis pi/3",
+        "Held-out tone rows reassigned in source axis order to J1 through J7; not a physical axis mapping",
+        "Peak-normalized small joint excursions; unchanged reference limits and controller EMA",
+        "Longer trials and existing C3 envelopes instead of upstream ramps",
+        "No high-band chirp or upstream gain/collision configuration"
+      ]
+    }
+  },
+  "common_plan": {
+    "hold": 3.0,
+    "gap": 3.0,
+    "rate": 60.0,
+    "max_velocity": 0.02,
+    "max_acceleration": 0.08,
+    "max_jerk": 0.6
+  },
+  "runtime_guards": {
+    "stale_after": 0.1,
+    "tracking_error": 0.003,
+    "max_lateness": 0.05
+  },
+  "stages": [
+    {
+      "id": "00_hold",
+      "entrypoint": "examples/joint_sysid.py",
+      "gate": "Healthy stationary joint mode; reviewed payload, space and stop procedure",
+      "expected_duration_s": 20.0,
+      "plan": {
+        "mode": "hold",
+        "joints": [1],
+        "amplitude_deg": 0.25,
+        "seconds": 14.0,
+        "ramp": 5.0
+      }
+    },
+    {
+      "id": "01_smoke_j1",
+      "entrypoint": "examples/joint_smoke.py",
+      "gate": "Hold passed without oscillation, drift or excessive torque",
+      "expected_duration_s": 26.0,
+      "runtime_guards": {"tracking_error": 0.002181661564992912},
+      "plan": {
+        "mode": "sine",
+        "joints": [1],
+        "amplitude_deg": 0.25,
+        "seconds": 20.0,
+        "ramp": 5.0,
+        "gap": 2.0,
+        "f0": 0.1,
+        "max_velocity": 0.01,
+        "max_acceleration": 0.05,
+        "max_jerk": 0.5
+      }
+    },
+    {
+      "id": "02_chirp_j1",
+      "entrypoint": "examples/joint_sysid.py",
+      "gate": "Smoke feedback verified motion, tracking and return to anchor",
+      "expected_duration_s": 46.0,
+      "plan": {
+        "mode": "chirp",
+        "joints": [1],
+        "amplitude_deg": 0.4,
+        "seconds": 40.0,
+        "ramp": 6.0,
+        "f0": 0.1,
+        "f1": 0.4
+      }
+    },
+    {
+      "id": "03_chirp_sequential",
+      "entrypoint": "examples/joint_sysid.py",
+      "gate": "J1 chirp passed; separately inspect each remaining joint's swept space",
+      "expected_duration_s": 304.0,
+      "plan": {
+        "mode": "chirp",
+        "joints": [1, 2, 3, 4, 5, 6, 7],
+        "amplitude_deg": 0.4,
+        "seconds": 40.0,
+        "ramp": 6.0,
+        "f0": 0.1,
+        "f1": 0.4
+      }
+    },
+    {
+      "id": "04_multisine_train",
+      "entrypoint": "examples/joint_sysid.py",
+      "gate": "All single-joint trials passed; combined arm/hand swept space reviewed",
+      "expected_duration_s": 66.0,
+      "plan": {
+        "mode": "multisine",
+        "joints": [1, 2, 3, 4, 5, 6, 7],
+        "amplitude_deg": 0.5,
+        "seconds": 60.0,
+        "ramp": 8.0,
+        "tones": [0.1, 0.23, 0.37],
+        "seed": 0
+      }
+    },
+    {
+      "id": "05_multisine_validation",
+      "entrypoint": "examples/joint_sysid.py",
+      "gate": "Training run passed; reserve this complete run from optimizer fitting",
+      "expected_duration_s": 66.0,
+      "plan": {
+        "mode": "multisine",
+        "joints": [1, 2, 3, 4, 5, 6, 7],
+        "amplitude_deg": 0.5,
+        "seconds": 60.0,
+        "ramp": 8.0,
+        "tones": [0.13, 0.29, 0.43],
+        "seed": 101
+      }
+    },
+    {
+      "id": "06_twin_chirp_j1",
+      "entrypoint": "examples/joint_sysid.py",
+      "reference_design": "frankatwin_joint",
+      "gate": "Current-session hold/smoke passed; selected joint and XHand swept space reviewed",
+      "expected_duration_s": 46.0,
+      "plan": {
+        "mode": "chirp",
+        "chirp_layout": "simultaneous",
+        "joints": [1],
+        "amplitude_deg": 0.2,
+        "f0": 0.1,
+        "f1": 0.7,
+        "seconds": 40.0,
+        "ramp": 6.0,
+        "rate": 50.0
+      }
+    },
+    {
+      "id": "07_twin_chirp_all",
+      "entrypoint": "examples/joint_sysid.py",
+      "reference_design": "frankatwin_joint",
+      "gate": "Every joint passed its individual trial; combined arm/XHand swept space reviewed",
+      "expected_duration_s": 46.0,
+      "plan": {
+        "mode": "chirp",
+        "chirp_layout": "simultaneous",
+        "joints": [1, 2, 3, 4, 5, 6, 7],
+        "amplitude_deg": 0.2,
+        "f0": 0.1,
+        "f1": 0.7,
+        "seconds": 40.0,
+        "ramp": 6.0,
+        "rate": 50.0
+      }
+    },
+    {
+      "id": "08_twin_multisine_validation",
+      "entrypoint": "examples/joint_sysid.py",
+      "reference_design": "frankatwin_joint",
+      "gate": "Combined low chirp passed; higher-frequency trial reviewed; reserve entire run from fitting",
+      "expected_duration_s": 66.0,
+      "plan": {
+        "mode": "multisine",
+        "tone_profile": "frankatwin",
+        "joints": [1, 2, 3, 4, 5, 6, 7],
+        "amplitude_deg": 0.08,
+        "seconds": 60.0,
+        "ramp": 8.0,
+        "rate": 50.0
+      }
+    },
+    {
+      "id": "09_twin_larger_low_chirp",
+      "entrypoint": "examples/joint_sysid.py",
+      "reference_design": "frankatwin_joint",
+      "gate": "Previous abort analysed; larger combined arm/XHand swept space reviewed; fixed hand pose, recording and local stop arranged",
+      "expected_duration_s": 46.0,
+      "runtime_guards": {"tracking_error": 0.008726646259971648},
+      "plan": {
+        "mode": "chirp",
+        "chirp_layout": "simultaneous",
+        "joints": [1, 2, 3, 4, 5, 6, 7],
+        "amplitude_deg": 1.0,
+        "f0": 0.05,
+        "f1": 0.15,
+        "seconds": 40.0,
+        "ramp": 6.0,
+        "rate": 50.0
+      }
+    }
+  ]
+}

@@ -115,6 +115,68 @@ runpy.run_path(sys.argv[0], run_name='__main__')
     assert (output / 'metadata.json').read_bytes() == before
 
 
+def test_bundled_sysid_stiff_profile_uses_higher_gains(tmp_path, monkeypatch):
+    monkeypatch.delenv('FR3_CONFIG_DIR', raising=False)
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(profile='sysid_stiff', kp=None, kd=None, filter_alpha=None)
+    gains = js.resolve_joint_gains(args)
+    assert gains['K_joint'] == [700.0, 700.0, 700.0, 700.0, 300.0, 180.0, 60.0]
+    assert gains['D_joint'] == [55.0, 55.0, 55.0, 55.0, 32.0, 27.0, 16.0]
+    assert gains['filter_alpha'] == 0.05
+    assert gains['use_friction'] is False
+
+
+def test_joint_profile_allows_explicit_gain_overrides(tmp_path, monkeypatch):
+    config_dir = tmp_path / 'configs'
+    config_dir.mkdir()
+    (config_dir / 'joint_impedance.fast.yaml').write_text("""
+K_joint: [1, 2, 3, 4, 5, 6, 7]
+D_joint: [8, 9, 10, 11, 12, 13, 14]
+filter_alpha: 0.7
+use_friction: true
+""")
+    monkeypatch.setenv('FR3_CONFIG_DIR', str(config_dir))
+    args = SimpleNamespace(profile='fast', kp=[20.] * 7, kd=None, filter_alpha=0.9)
+    gains = js.resolve_joint_gains(args)
+    assert gains['K_joint'] == [20.] * 7
+    assert gains['D_joint'] == [8., 9., 10., 11., 12., 13., 14.]
+    assert gains['filter_alpha'] == 0.9
+    assert gains['use_friction'] is False
+
+
+@pytest.mark.parametrize('options', [
+    ['--profile', 'missing_sysid_profile'],
+    ['--kp', *(['nan'] * 7)],
+    ['--kd', *(['inf'] * 7)],
+    ['--kp', *(['0'] * 7)],
+    ['--kd', *(['-1'] * 7)],
+    ['--filter-alpha', 'nan'],
+    ['--filter-alpha', '0'],
+    ['--filter-alpha', '1.1'],
+])
+def test_invalid_execution_gains_fail_before_connection(tmp_path, monkeypatch, options):
+    import fr3_stack.robot as robot_module
+
+    connections = []
+
+    def reject_connection(*args, **kwargs):
+        connections.append((args, kwargs))
+        raise AssertionError('invalid settings must not create a Robot')
+
+    monkeypatch.setattr(robot_module, 'Robot', reject_connection)
+    monkeypatch.delenv('FR3_CONFIG_DIR', raising=False)
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / 'rejected'
+    assert js.main(['--execute', '--host', 'must-not-connect.invalid',
+                    '--robot-id', 'test', '--output', str(output), *options]) == 1
+    assert not connections
+    metadata = json.loads((output / 'metadata.json').read_text())
+    assert metadata['status'] == 'failed'
+    assert metadata['commands_sent'] == 0
+    assert metadata['motion_command_attempted'] is False
+    assert not (output / 'commands_and_state.csv').exists()
+
+
 class Clock:
     def __init__(self):
         self.now = 10.
@@ -170,6 +232,62 @@ def test_stream_uses_actual_time_and_preserves_gains():
     assert metadata['commands_sent'] == len(robot.sent)
     rows = list(csv.reader(io.StringIO(buffer.getvalue())))
     assert all(float(b[1]) > float(a[1]) for a, b in zip(rows, rows[1:]))
+
+
+def test_tracking_guard_uses_previous_target_instead_of_anchor():
+    class FollowingRobot(StubRobot):
+        def send_joint_impedance(self, target, **gains):
+            super().send_joint_impedance(target, **gains)
+            self.changes['q'] = target.copy()
+
+    clock = Clock()
+    robot = FollowingRobot(clock)
+    trajectory = js.Trajectory(js.Plan(amplitude_deg=.5, seconds=4., ramp=1.,
+                                      hold=.1, rate=20., f0=.5, f1=.5))
+    js.stream(robot, trajectory, js.PREVIEW_Q, GAINS, csv.writer(io.StringIO()), {},
+              tracking_error=.002, clock=clock, sleep=clock.sleep)
+    assert max(abs(target[0] - js.PREVIEW_Q[0]) for target, _ in robot.sent) > .002
+
+
+def test_tracking_guard_detects_lost_tracking_after_departure():
+    class LosingRobot(StubRobot):
+        lost_tracking = False
+
+        def send_joint_impedance(self, target, **gains):
+            super().send_joint_impedance(target, **gains)
+            self.lost_tracking = abs(target[0] - js.PREVIEW_Q[0]) > .005
+            self.changes['q'] = js.PREVIEW_Q.copy() if self.lost_tracking else target.copy()
+
+    clock = Clock()
+    robot = LosingRobot(clock)
+    trajectory = js.Trajectory(js.Plan(amplitude_deg=.5, seconds=4., ramp=1.,
+                                      hold=.1, rate=20., f0=.5, f1=.5))
+    with pytest.raises(RuntimeError, match='tracking error'):
+        js.stream(robot, trajectory, js.PREVIEW_Q, GAINS, csv.writer(io.StringIO()), {},
+                  tracking_error=.002, clock=clock, sleep=clock.sleep)
+    assert robot.lost_tracking
+
+
+def test_tracking_guard_records_failing_joint_and_snapshot_before_send():
+    clock = Clock()
+    robot = StubRobot(clock)
+    q = js.PREVIEW_Q.copy()
+    q[6] += .0031
+    robot.changes['q'] = q
+    metadata = {}
+    with pytest.raises(RuntimeError, match=r'J7 error=.*limit=0.003 rad'):
+        js.stream(robot, tiny_plan(), js.PREVIEW_Q, GAINS, csv.writer(io.StringIO()), metadata,
+                  tracking_error=.003, clock=clock, sleep=clock.sleep)
+    fault = metadata['guard_failure']
+    assert fault['kind'] == 'tracking_error'
+    assert fault['joint'] == 7
+    assert fault['error_rad'] == pytest.approx(.0031)
+    assert fault['limit_rad'] == .003
+    np.testing.assert_array_equal(fault['measured_q_rad'], q)
+    np.testing.assert_array_equal(fault['previous_target_q_rad'], js.PREVIEW_Q)
+    assert fault['trajectory_t_s'] == 0.
+    assert not robot.sent
+    json.dumps(metadata, allow_nan=False)
 
 
 @pytest.mark.parametrize('change,match', [
@@ -256,6 +374,44 @@ def test_real_wire_commands_and_recording_contract(daemon_streaming, tmp_path):
     assert metadata['status'] == 'completed'
     assert all(float(row['state_daemon_timestamp']) == 123. for row in rows)
     np.testing.assert_allclose([float(rows[-1][f'q_target{i}']) for i in range(1, 8)], js.PREVIEW_Q)
+
+
+@pytest.mark.parametrize('override_gains', [False, True])
+def test_cli_stiff_profile_reaches_wire_and_metadata(daemon_streaming, tmp_path, monkeypatch, override_gains):
+    monkeypatch.delenv('FR3_CONFIG_DIR', raising=False)
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / 'stiff'
+    options = ['--execute', '--host', '127.0.0.1', '--robot-id', 'test',
+               '--cmd-port', str(daemon_streaming.cmd_port),
+               '--state-port', str(daemon_streaming.state_port),
+               '--profile', 'sysid_stiff', '--amplitude-deg', '.001',
+               '--seconds', '.12', '--ramp', '.05', '--hold', '.02',
+               '--rate', '100', '--max-lateness', '.2', '--output', str(output)]
+    expected = dict(K_joint=[700., 700., 700., 700., 300., 180., 60.],
+                    D_joint=[55., 55., 55., 55., 32., 27., 16.],
+                    filter_alpha=.05, use_friction=False)
+    if override_gains:
+        expected.update(K_joint=[710.] * 7, D_joint=[56.] * 7)
+        options += ['--kp', *(['710'] * 7), '--kd', *(['56'] * 7)]
+    with daemon_streaming.publish_loop(controller='joint_impedance', q=js.PREVIEW_Q.tolist()):
+        assert js.main(options) == 0
+    metadata = json.loads((output / 'metadata.json').read_text())
+    assert metadata['status'] == 'completed'
+    assert metadata['joint_impedance_profile'] == 'sysid_stiff'
+    assert metadata['commanded_controller_settings'] == expected
+    assert metadata['controller_settings_acknowledged'] is False
+    assert metadata['sysid_ready'] is False
+    messages = daemon_streaming.drain_commands()
+    assert messages
+    for payload in messages:
+        with SCHEMA.Command.from_bytes(payload) as command:
+            assert not command.termination
+            assert command.config.which() == 'jointImpedance'
+            cfg = command.config.jointImpedance
+            np.testing.assert_array_equal(list(cfg.kJoint), expected['K_joint'])
+            np.testing.assert_array_equal(list(cfg.dJoint), expected['D_joint'])
+            assert cfg.filterAlpha == .05
+            assert not cfg.useFriction
 
 
 def test_log_failure_during_motion_requests_termination(tmp_path, monkeypatch):

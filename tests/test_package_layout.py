@@ -91,6 +91,17 @@ def test_controller_configs_load(controller):
     assert cfg, f"{controller} yaml parsed empty"
 
 
+def test_joint_sysid_stiff_profile_loads(tmp_path, monkeypatch):
+    monkeypatch.delenv("FR3_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    cfg = load_controller_config("joint_impedance", "sysid_stiff")
+    base = load_controller_config("joint_impedance")
+    assert all(stiff > default for stiff, default in zip(cfg["K_joint"], base["K_joint"]))
+    assert all(stiff > default for stiff, default in zip(cfg["D_joint"], base["D_joint"]))
+    assert cfg["filter_alpha"] == base["filter_alpha"] == 0.05
+    assert cfg["use_friction"] is False
+
+
 def test_unknown_controller_rejected():
     with pytest.raises(Exception):
         load_controller_config("not_a_real_controller")
