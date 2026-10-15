@@ -13,12 +13,84 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+load_site_defaults() {
+    local name setting
+    local -a overrides=()
+    while IFS= read -r name; do
+      [[ "$name" == FR3_* ]] && overrides+=("$name=${!name}")
+    done < <(compgen -e)
+    set -a
+    source .setup/nuc-jz.env
+    set +a
+    for setting in "${overrides[@]}"; do
+      export "$setting"
+    done
+}
+
 DC=(docker compose --project-directory "$PWD" -f containers/compose.yml)
+# Consume the variant flag before dispatch so it works with every subcommand.
+jz=0
+args=()
+for arg in "$@"; do
+  if [[ "$arg" == --jz ]]; then
+    jz=1
+  else
+    args+=("$arg")
+  fi
+done
+set -- "${args[@]}"
+case "${1:-help}" in
+  up|down|logs|ps|ft|config|version)
+    if [[ -f .setup/nuc-jz.env ]]; then
+      load_site_defaults
+      jz=1
+    fi
+    ;;
+esac
+if (( jz )); then
+  DC+=(--project-name fr3_stack_jz -f containers/compose.jz.yml)
+fi
 
 # ----- helpers -----------------------------------------------------------
 
 log()  { printf '[fr3-stack] %s\n' "$*" >&2; }
 die()  { log "error: $*"; exit 1; }
+
+prepare_docker() {
+    local endpoint socket_path docker_path name
+    if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
+      endpoint="$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}')" \
+        || die "cannot inspect Docker context '$DOCKER_CONTEXT'"
+    elif [[ -n "${DOCKER_HOST:-}" ]]; then
+      endpoint="$DOCKER_HOST"
+    else
+      endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}')" \
+        || die "cannot inspect the selected Docker context"
+    fi
+
+    [[ "$endpoint" == unix://* ]] || return 0
+    socket_path="${endpoint#unix://}"
+    [[ -S "$socket_path" ]] || return 0
+    if [[ -r "$socket_path" && -w "$socket_path" ]]; then
+      return 0
+    fi
+
+    command -v sudo >/dev/null || die "no access to $socket_path; sudo is not installed"
+    log "no access to $socket_path; using sudo for Docker (password may be required)"
+    sudo -v || die "sudo authorization failed; no Docker operation was started"
+    docker_path="$(command -v docker)"
+
+    # Only elevate Docker, retain launch settings, and pin the same local daemon.
+    local -a launch_env=()
+    while IFS= read -r name; do
+      case "$name" in
+        FR3_*|COMPOSE_*|UID|GID) launch_env+=("$name=${!name}") ;;
+      esac
+    done < <(compgen -e)
+    DC=(sudo env -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH
+        "${launch_env[@]}" "$docker_path"
+        --config "${DOCKER_CONFIG:-$HOME/.docker}" --host "$endpoint" "${DC[@]:1}")
+}
 
 usage() {
     cat <<'EOF'
@@ -41,11 +113,23 @@ modes:
   hybrid  force/position hybrid (needs --ft)
 
 flags:
+  --jz         use Compose project fr3_stack_jz and containers/compose.jz.yml;
+                requires FR3_JZ_IMAGE, FR3_JZ_CALIB_DIR, FR3_JZ_RECORDINGS_DIR
   --ft         enable Bota EtherCAT FT sensor; uses FR3_FT_SENSOR_CONFIG
                 or /opt/bota/driver_config/bota_binary.json by default
   --no-ft      explicitly disable FT sensor (clears env)
   --attach,-a  run in foreground (default: detached + auto `logs -f`;
                 in both modes Ctrl+C stops the container)
+
+Docker access:
+  An inaccessible local Unix socket uses sudo for Docker only and may prompt
+  for your password. FR3_/COMPOSE_ settings and the selected socket are retained.
+  Remote Docker endpoints are never elevated or redirected to local Docker.
+
+Prepared site:
+  Service commands automatically use containers/compose.jz.yml when
+  .setup/nuc-jz.env exists. Exported FR3_ values override its site defaults.
+  JZ startup defaults to --no-build --pull never for the prepared image.
 
 ft subcommand (smoke test — Bota only, no robot connection):
   ./fr3-stack ft up [--attach|-a]   start `fr3-stack-ft`; streams raw
@@ -139,7 +223,15 @@ case "$cmd" in
       shift
     done
 
+    if (( jz )); then
+      passthrough=(--no-build --pull never "${passthrough[@]}")
+    fi
+    prepare_docker
+
     # ---- show what we're about to do --------------------------------------
+    if (( jz )); then
+      log "image      = ${FR3_JZ_IMAGE:-'(not configured)'}"
+    fi
     log "mode       = $FR3_INITIAL_CONTROLLER"
     log "robot ip   = ${FR3_ROBOT_IP:-192.168.1.11}"
     log "cmd port   = ${FR3_CMD_PORT:-5555}"
@@ -187,6 +279,8 @@ case "$cmd" in
       "") die "missing ft subcommand. one of: up | down | logs | stream | ps" ;;
       *)  die "unknown ft subcommand '$sub' (expected: up | down | logs | stream | ps)" ;;
     esac
+
+    prepare_docker
 
     case "$sub" in
       up)
@@ -257,6 +351,10 @@ case "$cmd" in
   *)
     # Anything else (down / logs / ps / build / pull / config / ...) is
     # forwarded verbatim to docker compose.
+    case "$cmd" in
+      config|version) : ;;
+      *) prepare_docker ;;
+    esac
     exec "${DC[@]}" "$cmd" "$@"
     ;;
 esac

@@ -23,6 +23,16 @@ Ships as a Docker image (libfranka 0.17.0, pinocchio 3.x, Eigen 3.4, gcc 13).
 
 Modes are `idle`, `cart`, `joint`, `adm`, and `hybrid`. For a non-idle initial controller, the daemon anchors its target to the live robot state at activation.
 
+If the selected local Docker socket is inaccessible, the launcher asks for sudo
+authorization for Docker only, while retaining your `FR3_`/`COMPOSE_` settings
+and selected socket. This does not select a remote NUC or satisfy the RT/network
+requirements. See [Docker access troubleshooting](troubleshooting.md#docker-socket-permission-denied).
+
+An installed `.setup/nuc-jz.env` automatically selects the prepared JZ image and
+external data directories for service commands, without needing `--jz` or SDK
+activation first. Exported `FR3_` settings override site defaults; `up <mode>`
+still chooses the controller. JZ startup defaults to no build or pull.
+
 ### Daemon flags
 
 | Flag                     | Default      | Notes                                            |

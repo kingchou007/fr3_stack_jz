@@ -10,6 +10,16 @@ in [AGENTS.md](AGENTS.md).
 ## [Unreleased]
 
 ### Changed
+- `AGENTS.md` and `sync.md` (2026-10-09): make the work-PC agent responsible
+  for the complete SSH-based NUC update, including configured diagnostic SDKs,
+  prepared launch references, identity checks and failure recovery. No NUC
+  Codex installation is required; documentation-only updates retain the
+  verified runtime release, and controller activation remains a separate task.
+- `containers/Dockerfile` (2026-10-09): limit build parallelism with `BUILD_JOBS`
+  (default 4) and build/run hardware-free C++ tests by default. Set
+  `FR3_BUILD_TESTS=OFF` explicitly to skip them; copy C++ fixtures into the
+  builder and keep test executables out of the runtime image. Build results
+  do not establish firmware or RT compatibility.
 - Daemon safety limits (2026-10-14) now match FrankaTwin's sysid setup:
   `src/main.cpp` raises the libfranka `setCollisionBehavior` thresholds from
   80 to 100 Nm / N on every joint and Cartesian axis, and
@@ -38,6 +48,28 @@ in [AGENTS.md](AGENTS.md).
   updated together. No PR has been opened for this change.
 
 ### Added
+- `sync.md` and `AGENTS.md` (2026-10-09): document a separate NUC user checkout,
+  Docker build access, a minimal SDK environment, and role-specific preparation.
+  Pair releases from the workstation's selected source snapshot, including
+  uncommitted changes; preserve NUC checkout edits and keep controller
+  activation separate from code installation.
+- `scripts/sync-nuc --jz` and `fr3-stack --jz` (2026-10-09): prepare separate
+  `fr3-stack-jz` images and `jz/` source releases, with an explicit variant
+  label and a separate `fr3_stack_jz` Compose project. The JZ override pins
+  the selected image and external calibration/recording paths; preparation
+  preserves the existing stack and does not activate a controller. Configure
+  `build_jobs` to limit build memory usage on the NUC.
+- `scripts/sync-nuc` (2026-10-09): local image build/export plus matching editable
+  SDK installation; later SSH inspection and NUC snapshot/build use the same
+  source hash. Reports distinguish prepared images from active robot deployment.
+  Dummy-address, active-controller, snapshot-integrity, and client-rollback
+  guards are tested without hardware. Both project agent guides select local
+  builds first; real NUC preparation requires its configured phase.
+- `sync.md` (2026-10-09): workstation/NUC release synchronization, pinned source
+  revisions and image identities, site configuration preservation, staged
+  activation, validation, and rollback. README and agent-guide links make the
+  workflow discoverable. Dummy-IP installation is distinguished from verified
+  NUC deployment; documentation does not claim a runtime version handshake.
 - Daemon `--initial-cart-profile <yaml>` / `FR3_INITIAL_CART_PROFILE`
   (2026-10-14): `up cart` can boot holding with a Cartesian profile's gains
   instead of the built-in 200/20, so the arm feels the same before and after a
@@ -148,6 +180,20 @@ in [AGENTS.md](AGENTS.md).
   now runs. ([#5](https://github.com/Robot-Dexterity-Lab/fr3_stack/pull/5))
 
 ### Fixed
+- `fr3-stack` service commands now automatically load an installed
+  `.setup/nuc-jz.env` and select the JZ Compose override, with exported `FR3_`
+  values taking precedence. Bare `up` commands use the prepared image and
+  external data directories instead of an unrelated stale `fr3-stack:latest`
+  that can reject `--recording-port`. JZ startup defaults to no build or pull;
+  the daemon, protocol and controller math are unchanged. See `sync.md` and
+  `docs/troubleshooting.md`. No PR has been opened for this change.
+- `fr3-stack` now detects an inaccessible local Docker Unix socket and asks
+  for sudo authorization before any Compose operation. The Docker-only fallback
+  preserves `FR3_`/`COMPOSE_` settings, the user's client configuration and the
+  selected local endpoint, so commands no longer fail with a socket permission
+  error or silently lose launch settings. Remote endpoints and daemon-free
+  `config`/`version` commands remain unprivileged; controller behavior is unchanged.
+  See `docs/troubleshooting.md` and `sync.md`. No PR has been opened for this change.
 - `RingLogWriter` now detects short writes and header/row/final-flush/close
   failures, retains the first operation/errno, and counts only flushed rows as
   written. Failed streams keep draining off the RT thread. Completion requires
