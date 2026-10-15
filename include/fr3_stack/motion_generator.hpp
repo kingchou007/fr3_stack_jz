@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <Eigen/Dense>
 #include <Eigen/Geometry>
 #include <algorithm>
 #include <cmath>
@@ -38,6 +39,10 @@ class TargetGenerator {
     // True once the trajectory has reached its goal. PassThrough never
     // finishes; MinJerk finishes after run_time elapsed.
     virtual bool finished() const = 0;
+    // Called once right after start() with the base-frame end-effector
+    // Jacobian at the start configuration. Generators with a joint-speed
+    // bound may lengthen their duration here; the default does nothing.
+    virtual void limit_joint_speed(const Eigen::Matrix<double, 6, 7>& /*J*/) {}
 };
 
 // Zero-order hold on the last externally-set target. Use for ML policies that
@@ -71,18 +76,25 @@ class PassThroughGenerator : public TargetGenerator {
 // At s=0,1 the function value is 0,1 and the first two derivatives vanish —
 // so position, velocity AND acceleration are continuous at both endpoints.
 //
-// run_time must be chosen by the caller to honor velocity / acceleration
-// limits (peak |v| = 1.875 · Δp / T, peak |a| = 5.7735 · Δp / T²). The
-// generator does NOT enforce limits — that's the caller's job. For a 50 cm
-// move at 1 m/s peak, T ≈ 0.94 s; round up for safety.
+// run_time must be chosen by the caller to honor Cartesian velocity /
+// acceleration limits (peak |v| = 1.875 · Δp / T, peak |a| = 5.7735 · Δp / T²).
+// For a 50 cm move at 1 m/s peak, T ≈ 0.94 s; round up for safety.
+//
+// q_max_speed > 0 additionally bounds the peak joint speed, as FrankaTwin's
+// move_to does: limit_joint_speed() estimates Δq ≈ J⁺·Δx at the start pose
+// and stretches run_time to at least 1.875 · max|Δq| / q_max_speed. The
+// estimate is a first-order linearization, so it is approximate for large
+// moves. run_time is never shortened.
 class MinJerkGenerator : public TargetGenerator {
  public:
     MinJerkGenerator(const Eigen::Vector3d& goal_pos,
                      const Eigen::Quaterniond& goal_quat,
-                     double run_time)
+                     double run_time,
+                     double q_max_speed = 0.0)
         : goal_pos_(goal_pos),
           goal_quat_(goal_quat.normalized()),
-          run_time_(std::max(run_time, 1e-3)) {}
+          run_time_(std::max(run_time, 1e-3)),
+          q_max_speed_(q_max_speed) {}
 
     void start(const Eigen::Vector3d& pos0,
                const Eigen::Quaterniond& quat0) override {
@@ -112,11 +124,33 @@ class MinJerkGenerator : public TargetGenerator {
 
     bool finished() const override { return elapsed_ >= run_time_; }
 
+    void limit_joint_speed(const Eigen::Matrix<double, 6, 7>& J) override {
+        if (!(q_max_speed_ > 0.0)) return;
+        // Twist that moves the start pose to the goal: translation, then the
+        // base-frame rotation vector of goal · start⁻¹ (start() already put
+        // the goal in the start's hemisphere).
+        Eigen::Matrix<double, 6, 1> dx;
+        dx.head<3>() = goal_pos_ - p0_;
+        const Eigen::AngleAxisd aa(goal_quat_ * q0_.conjugate());
+        dx.tail<3>() = aa.angle() * aa.axis();
+        // Damped least-squares pseudo-inverse: finite near singularities.
+        constexpr double kLambda2 = 1e-4;
+        const Eigen::Matrix<double, 6, 6> JJt =
+            J * J.transpose() + kLambda2 * Eigen::Matrix<double, 6, 6>::Identity();
+        const Eigen::Matrix<double, 7, 1> dq =
+            J.transpose() * JJt.ldlt().solve(dx);
+        run_time_ = std::max(run_time_,
+                             1.875 * dq.cwiseAbs().maxCoeff() / q_max_speed_);
+    }
+
+    double run_time() const { return run_time_; }
+
  private:
     Eigen::Vector3d    p0_{Eigen::Vector3d::Zero()};
     Eigen::Vector3d    goal_pos_;
     Eigen::Quaterniond q0_{Eigen::Quaterniond::Identity()};
     Eigen::Quaterniond goal_quat_;
     double             run_time_;
+    double             q_max_speed_{0.0};   // rad/s; 0 ⇒ no joint-speed bound
     double             elapsed_{0.0};
 };

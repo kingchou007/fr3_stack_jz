@@ -18,9 +18,23 @@
 using Vector6d = Eigen::Matrix<double, 6, 1>;
 using Vector7d = Eigen::Matrix<double, 7, 1>;
 
-// libfranka rejects step torque jumps as discontinuities; 1 Nm/ms matches
-// franka_example_controllers and gives the impedance loops headroom.
-constexpr double kDeltaTauMax = 1.0;  // [Nm] per 1 ms
+// libfranka rejects step torque jumps as discontinuities above its
+// kMaxTorqueRate (1000 Nm/s). 0.8 Nm/ms = 800 Nm/s keeps a 20% margin and
+// matches FrankaTwin's osc_shm DEFAULT_MAX_TORQUE_RATE.
+constexpr double kDeltaTauMax = 0.8;  // [Nm] per 1 ms
+
+// FR3 joint torque limits (Nm). The final stage clamps every controller's
+// commanded torque to these before slew limiting, as FrankaTwin's osc_shm
+// TAU_LIMIT does.
+constexpr std::array<double, 7> kFr3TauMax = {
+    87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0};
+
+inline std::array<double, 7> clamp_torque(const std::array<double, 7>& tau) {
+    std::array<double, 7> out{};
+    for (int i = 0; i < 7; ++i)
+        out[i] = std::clamp(tau[i], -kFr3TauMax[i], kFr3TauMax[i]);
+    return out;
+}
 
 // FR3 hard joint limits (rad). From Franka Research 3 documentation.
 constexpr std::array<double, 7> kFr3QMax = {

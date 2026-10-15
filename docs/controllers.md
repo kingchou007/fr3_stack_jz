@@ -212,7 +212,8 @@ The generator captures $(p_0, q_0)$ from the live pose at activation, so the tra
 | ----------------- | ------ | ------------------------------------------------------- |
 | `targetPos`       | 3      | goal x, y, z [m]                                        |
 | `targetQuatXyzw`  | 4      | goal orientation                                        |
-| `runTime`         | —      | trajectory duration [s], must be > 0                    |
+| `runTime`         | —      | minimum trajectory duration [s], must be > 0            |
+| `qMaxSpeed`       | —      | peak joint-speed bound [rad/s]; client default 0.5, max 1.25, 0 = off |
 | `k` / `d`         | 6      | inner cart-imp gains (active during AND after the move) |
 | `qNull` / `kNull` | 7 / —  | nullspace anchor                                        |
 
@@ -227,6 +228,22 @@ $$
 $$
 
 Rule of thumb: `T ≥ 1 s` for `Δp ≤ 30 cm`. Round up.
+
+`qMaxSpeed` adds FrankaTwin's joint-speed bound on top. At activation the
+daemon estimates the joint motion from the start-pose Jacobian,
+$\Delta q \approx J^{+}\Delta x$ (damped least squares, $\Delta x$ =
+translation plus rotation vector), and uses
+
+$$
+T = \max\!\Bigl(\texttt{runTime},\; 1.875\,\frac{\max_i |\Delta q_i|}{\texttt{qMaxSpeed}}\Bigr).
+$$
+
+The estimate is first-order, so for large moves the real peak joint speed can
+differ from the bound. `run_time` is never shortened. `Arm.move_to` therefore
+waits past `duration` until the EE is within 2 cm / 0.1 rad of the goal and
+all joint speeds stay below 0.01 rad/s for 0.1 s, and raises `TimeoutError`
+after `settle_timeout` (default 30 s). Pass `q_max_speed=None` for the old
+fixed-duration behaviour.
 
 ### Lifecycle
 
@@ -293,4 +310,6 @@ Three terms get summed into $\tau$ regardless of which controller is active.
 
 **Stribeck-style friction compensation.** $\tau_{\text{fric},i} = f_{p1,i}\,\tanh(f_{p2,i}\,\dot q_i) + f_{p3,i}\,\dot q_i$, off by default per controller via `useFriction`. Defaults are the Cognetti FR3 fit.
 
-**Torque rate limit.** Final stage clamps the per-tick slew to $|\Delta\tau| \le 1\;\text{N·m/ms}$.
+**Torque limit.** Final stage clamps each joint to 87/87/87/87/12/12/12 N·m before the rate limit.
+
+**Torque rate limit.** Final stage clamps the per-tick slew to $|\Delta\tau| \le 0.8\;\text{N·m/ms}$ (800 N·m/s, 20% below libfranka's 1000 N·m/s discontinuity reflex; same as FrankaTwin).

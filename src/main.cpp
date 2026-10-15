@@ -40,6 +40,7 @@
 #include <fr3_stack/utils/streaming_target_interpolator.hpp>
 #include <fr3_stack/controllers/controller_base.hpp>
 #include <fr3_stack/controllers/gravity_compensation_controller.hpp>
+#include <fr3_stack/controllers/cart_profile.hpp>
 #include <fr3_stack/controllers/cartesian_impedance_controller.hpp>
 #include <fr3_stack/controllers/joint_impedance_controller.hpp>
 #include <fr3_stack/controllers/cartesian_admittance_controller.hpp>
@@ -101,6 +102,9 @@ struct PendingCommand {
 // ============================================================================
 
 namespace {
+
+// Upper bound for MoveToCmd.qMaxSpeed, mirroring FrankaTwin's kQMaxSpeedMax.
+constexpr double kMoveToQMaxSpeedMax = 1.25;  // [rad/s]
 
 template <int N>
 Eigen::Matrix<double, N, 1> read_vec(::capnp::List<double>::Reader r,
@@ -251,7 +255,15 @@ PendingCommand parse_command(const void* data, size_t size_bytes) {
             // would only add lag, so disable the smoother.
             out.cart.filter_alpha = 1.0;
 
-            out.generator = std::make_unique<MinJerkGenerator>(pos, q, run_time);
+            const double q_max_speed = c.getQMaxSpeed();
+            if (!(q_max_speed >= 0.0 && q_max_speed <= kMoveToQMaxSpeedMax))
+                throw std::runtime_error(
+                    "moveTo: qMaxSpeed must be in [0, "
+                    + std::to_string(kMoveToQMaxSpeedMax) + "] rad/s, got "
+                    + std::to_string(q_max_speed));
+
+            out.generator = std::make_unique<MinJerkGenerator>(
+                pos, q, run_time, q_max_speed);
             break;
         }
         case Command::Config::HYBRID: {
@@ -461,6 +473,9 @@ struct Args {
     // ring that a writer thread drains to this path. See ring_log.hpp.
     std::string    log_1khz;
     int recording_port{5557};
+    // Cartesian profile YAML whose gains the boot anchor uses when
+    // --initial-controller is cartesian_impedance. Empty ⇒ built-in defaults.
+    std::string    initial_cart_profile;
 };
 
 Args parse_args(int argc, char** argv) {
@@ -502,6 +517,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--ft-calib")         a.ft_calib_path    = next();
         else if (k == "--ft-controllers-raw") a.ft_controllers_raw = true;
         else if (k == "--log-1khz")         a.log_1khz         = next();
+        else if (k == "--initial-cart-profile") a.initial_cart_profile = next();
         // Backwards-compat for the original Bota-only flags. Equivalent to
         // --ft-sensor-kind bota --ft-sensor-config <dir>/<json>.
         else if (k == "--bota-config-dir") {
@@ -522,6 +538,7 @@ Args parse_args(int argc, char** argv) {
                       << "  [--recording-port 5557] acknowledged start/stop/status\n"
                       << "  [--initial-controller idle|cartesian_impedance|joint_impedance|admittance|hybrid]\n"
                       << "  [--cartesian|--joint|--admittance|--hybrid|--idle]   shorthand for the above\n"
+                      << "  [--initial-cart-profile <yaml>] Cartesian profile (SDK format) for the boot hold\n"
                       << "  [--ft-sensor-kind <kind>]    FT sensor backend (currently: bota)\n"
                       << "  [--ft-sensor-config <str>]   backend-specific config (Bota: full path to driver JSON)\n"
                       << "  [--ft-calib <path>]          payload calibration YAML; default: $FR3_FT_CALIB or\n"
@@ -549,6 +566,19 @@ int main(int argc, char** argv) {
     try { args = parse_args(argc, argv); }
     catch (const std::exception& e) {
         std::cerr << log_pfx() << "args error: " << e.what() << "\n"; return 1;
+    }
+
+    // Boot-hold gains: load before connecting so a bad profile never moves
+    // the arm. Only the cartesian_impedance boot anchor uses them.
+    CartesianImpedanceCfg boot_cart_cfg;
+    if (!args.initial_cart_profile.empty()) {
+        try { boot_cart_cfg = load_cart_impedance_profile(args.initial_cart_profile); }
+        catch (const std::exception& e) {
+            std::cerr << log_pfx() << "ERROR: " << e.what() << "\n"; return 1;
+        }
+        std::cout << log_pfx() << "initial cart profile " << args.initial_cart_profile
+                  << ": K = " << boot_cart_cfg.K.transpose()
+                  << ", D = " << boot_cart_cfg.D.transpose() << "\n";
     }
 
     if (args.recording_port < 1 || args.recording_port > 65535 ||
@@ -601,10 +631,11 @@ int main(int argc, char** argv) {
 
     // Collision thresholds — Nm on joints, N/Nm on Cartesian. 20 was too
     // tight: tiny gravity drift on first RT tick tripped cartesian_reflex.
-    // 80 matches Franka's own example values; still well below joint limits.
+    // 100 matches FrankaTwin's sysid setup (config/robot.yaml collision.*),
+    // so excitation runs are collected under the same reflex thresholds.
     robot.setCollisionBehavior(
-        {{80, 80, 80, 80, 80, 80, 80}}, {{80, 80, 80, 80, 80, 80, 80}},
-        {{80, 80, 80, 80, 80, 80}},     {{80, 80, 80, 80, 80, 80}});
+        {{100, 100, 100, 100, 100, 100, 100}}, {{100, 100, 100, 100, 100, 100, 100}},
+        {{100, 100, 100, 100, 100, 100}},      {{100, 100, 100, 100, 100, 100}});
 
     franka::RobotState s0 = robot.readOnce();
     std::cout << log_pfx() << "connected to " << args.robot_ip
@@ -981,6 +1012,7 @@ int main(int argc, char** argv) {
                 Eigen::Affine3d T_live(Eigen::Matrix4d::Map(s.O_T_EE.data()));
                 if (args.initial_controller == ControllerType::CartesianImpedance) {
                     pending.type        = ControllerType::CartesianImpedance;
+                    pending.cart        = boot_cart_cfg;
                     pending.cart.target = T_live;
                 } else if (args.initial_controller == ControllerType::JointImpedance) {
                     pending.type = ControllerType::JointImpedance;
@@ -1056,6 +1088,10 @@ int main(int argc, char** argv) {
                     Eigen::Affine3d T_now(Eigen::Matrix4d::Map(s.O_T_EE.data()));
                     active_gen->start(T_now.translation(),
                                        Eigen::Quaterniond(T_now.linear()));
+                    const std::array<double, 42> J_arr =
+                        model.zeroJacobian(franka::Frame::kEndEffector, s);
+                    active_gen->limit_joint_speed(
+                        Eigen::Map<const Eigen::Matrix<double, 6, 7>>(J_arr.data()));
                 } else {
                     active_gen.reset();
                 }
@@ -1152,7 +1188,8 @@ int main(int argc, char** argv) {
         }
 
         std::array<double, 7> tau_target = active->compute(s, model);
-        std::array<double, 7> tau_out    = rate_limit(tau_prev, tau_target);
+        std::array<double, 7> tau_out    =
+            rate_limit(tau_prev, clamp_torque(tau_target));
         tau_prev = tau_out;
 
         // Only active recordings evaluate this fixed-size capture. start/stop

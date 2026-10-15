@@ -12,6 +12,7 @@ shape from ``send``. Underlying Robot streaming is covered separately in
 from __future__ import annotations
 
 import math
+import threading
 import time
 
 import numpy as np
@@ -190,8 +191,61 @@ def test_move_to_emits_moveto_then_blocks(arm, daemon):
         mt = cmd.config.moveTo
         assert list(mt.targetPos) == [0.5, 0.0, 0.4]
         assert mt.runTime == pytest.approx(0.1)
+        assert mt.qMaxSpeed == pytest.approx(0.5)   # FrankaTwin default
     # Returned observation is the post-move snapshot.
     assert obs.pose.approx_equal(target, pos_tol=1e-9, rot_tol=1e-9)
+
+
+def test_move_to_forwards_q_max_speed(arm, daemon):
+    target = Pose.from_xyz_quat([0.5, 0.0, 0.4], [0, 0, 0, 1])
+    daemon.publish_until_received(arm.robot, pos=(0.5, 0.0, 0.4))
+    arm.move_to(target, duration=0.05, q_max_speed=1.25)
+    with daemon.recv_command() as cmd:
+        assert cmd.config.moveTo.qMaxSpeed == pytest.approx(1.25)
+    arm.move_to(target, duration=0.05, q_max_speed=None)
+    with daemon.recv_command() as cmd:
+        assert cmd.config.moveTo.qMaxSpeed == 0.0   # bound disabled
+
+
+@pytest.mark.parametrize("bad", [0.0, -0.1, 1.3])
+def test_move_to_rejects_out_of_range_q_max_speed(arm, bad):
+    with pytest.raises(ValueError, match="q_max_speed"):
+        arm.robot.send_move_to([0.5, 0.0, 0.4], [0, 0, 0, 1], 1.0, q_max_speed=bad)
+
+
+def test_move_to_waits_past_duration_until_arrival(arm, daemon):
+    """The daemon may stretch the move for q_max_speed; move_to must not
+    return at ``duration`` while the arm is still on its way."""
+    target = Pose.from_xyz_quat([0.5, 0.0, 0.4], [0, 0, 0, 1])
+    daemon.publish_until_received(arm.robot, pos=(0.3, 0.0, 0.4), dq=(0.05,) * 7)
+
+    stop = threading.Event()
+    def publish():
+        t0 = time.monotonic()
+        while not stop.is_set():
+            if time.monotonic() - t0 < 0.4:      # still travelling
+                daemon.publish_state(pos=(0.4, 0.0, 0.4), dq=(0.05,) * 7)
+            else:                                 # arrived and at rest
+                daemon.publish_state(pos=(0.5, 0.0, 0.4))
+            time.sleep(0.01)
+    th = threading.Thread(target=publish, daemon=True)
+    th.start()
+    try:
+        t0 = time.monotonic()
+        obs = arm.move_to(target, duration=0.05, settle_timeout=5.0)
+        elapsed = time.monotonic() - t0
+    finally:
+        stop.set()
+        th.join()
+    assert elapsed >= 0.4
+    assert np.allclose(obs.pose.pos, [0.5, 0.0, 0.4])
+
+
+def test_move_to_raises_when_target_never_reached(arm, daemon):
+    target = Pose.from_xyz_quat([0.5, 0.0, 0.4], [0, 0, 0, 1])
+    daemon.publish_until_received(arm.robot, pos=(0.3, 0.0, 0.4))
+    with pytest.raises(TimeoutError, match="not settled"):
+        arm.move_to(target, duration=0.05, settle_timeout=0.2)
 
 
 # ============================================================================

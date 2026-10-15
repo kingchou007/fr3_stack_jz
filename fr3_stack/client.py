@@ -10,12 +10,22 @@ import numpy as np
 
 from .geometry import Pose
 from .measure import Recorder
-from .robot import Robot
+from .robot import MOVE_TO_Q_MAX_SPEED_DEFAULT, Robot
 from .state import Observation
 from .wire import aslist
 
 ArrayLike = Union[np.ndarray, Sequence[float]]
 _AXIS = {"x": 0, "y": 1, "z": 2}
+
+# Arm.move_to settle detection: arrival means the EE is within the pose
+# tolerances of the goal (impedance leaves a small steady-state error) and
+# every joint speed stays below _SETTLE_DQ for _SETTLE_HOLD s. Held-arm dq
+# noise is ~1e-3 rad/s.
+_SETTLE_POS  = 0.02   # m
+_SETTLE_ROT  = 0.1    # rad
+_SETTLE_DQ   = 0.01   # rad/s
+_SETTLE_HOLD = 0.1    # s
+_SETTLE_POLL = 0.01   # s
 
 
 class Arm:
@@ -89,15 +99,46 @@ class Arm:
         target: Pose,
         *,
         duration: float = 2.0,
+        q_max_speed: float | None = MOVE_TO_Q_MAX_SPEED_DEFAULT,
+        settle_timeout: float = 30.0,
     ) -> Observation:
-        """Min-jerk move to ``target``; blocks ``duration`` s. Returns post-move obs."""
+        """Min-jerk move to ``target``; returns the post-move observation.
+
+        The daemon may lengthen the move beyond ``duration`` to keep the peak
+        joint speed under ``q_max_speed`` (see ``Robot.send_move_to``), so
+        after ``duration`` this keeps blocking until the EE is within
+        ``_SETTLE_POS`` / ``_SETTLE_ROT`` of ``target`` and every joint speed
+        stays below ``_SETTLE_DQ`` for ``_SETTLE_HOLD`` s. Raises
+        ``TimeoutError`` if that has not happened ``settle_timeout`` s after
+        ``duration`` (e.g. the arm is blocked by contact).
+        """
         self._robot.send_move_to(
             target_pos       = target.pos,
             target_quat_xyzw = target.quat,
             run_time         = duration,
+            q_max_speed      = q_max_speed,
         )
         time.sleep(duration)
-        return self.observe()
+        deadline = time.monotonic() + settle_timeout
+        still_since = None
+        while True:
+            obs = self.observe()
+            now = time.monotonic()
+            arrived = obs.pose.approx_equal(
+                target, pos_tol=_SETTLE_POS, rot_tol=_SETTLE_ROT)
+            if arrived and np.max(np.abs(obs.dq)) < _SETTLE_DQ:
+                still_since = now if still_since is None else still_since
+                if now - still_since >= _SETTLE_HOLD:
+                    return obs
+            else:
+                still_since = None
+            if now > deadline:
+                raise TimeoutError(
+                    f"move_to: arm not settled at target {settle_timeout:g} s "
+                    f"after duration elapsed (max |dq| "
+                    f"{np.max(np.abs(obs.dq)):.3g} rad/s, position error "
+                    f"{np.linalg.norm(obs.pose.pos - target.pos):.3g} m)")
+            time.sleep(_SETTLE_POLL)
 
     # ---- state switches ---------------------------------------------------
 

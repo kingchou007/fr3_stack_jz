@@ -9,7 +9,55 @@ in [AGENTS.md](AGENTS.md).
 
 ## [Unreleased]
 
+### Changed
+- Daemon safety limits (2026-10-14) now match FrankaTwin's sysid setup:
+  `src/main.cpp` raises the libfranka `setCollisionBehavior` thresholds from
+  80 to 100 Nm / N on every joint and Cartesian axis, and
+  `include/fr3_stack/utils/controllers_common.hpp` lowers the final torque slew
+  limit `kDeltaTauMax` from 1.0 to 0.8 Nm per 1 ms tick (800 Nm/s, 20% below
+  libfranka's 1000 Nm/s discontinuity reflex). Before slew limiting, every
+  controller's commanded torque is now also clamped per joint to the FR3 limits
+  87/87/87/87/12/12/12 Nm (`kFr3TauMax`, `clamp_torque`), as FrankaTwin's
+  `TAU_LIMIT` does. Contacts now need more force before the robot reflexes,
+  gain/target steps ramp slightly slower, and a controller can no longer request
+  more than the joint limit (previously left to libfranka to reject). Takes
+  effect only after the NUC image is rebuilt and the daemon restarted. No PR has
+  been opened for this change.
+- `move_to` now bounds peak joint speed like FrankaTwin (2026-10-14): new
+  `MoveToCmd.qMaxSpeed @9` in `proto/fr3.capnp`, `q_max_speed` on
+  `Robot.send_move_to` / `Arm.move_to` (default 0.5 rad/s, max 1.25, `None`
+  disables). The daemon stretches the min-jerk duration to
+  `≥ 1.875·max|Δq|/q_max_speed`, with Δq estimated from the start-pose
+  Jacobian, so **resets and setup moves that are large in joint space now take
+  longer than the requested `duration`**. `Arm.move_to` (and
+  `RobotAgent.reset`) therefore block until the arm has settled at the goal and
+  raise `TimeoutError` after `settle_timeout` (30 s) if it never arrives, e.g.
+  when blocked by contact. A new client against an old daemon sends a field the
+  daemon ignores (no bound, still waits for arrival); an old client against a
+  new daemon sends 0 (no bound). Workstation SDK and NUC image should be
+  updated together. No PR has been opened for this change.
+
 ### Added
+- Daemon `--initial-cart-profile <yaml>` / `FR3_INITIAL_CART_PROFILE`
+  (2026-10-14): `up cart` can boot holding with a Cartesian profile's gains
+  instead of the built-in 200/20, so the arm feels the same before and after a
+  client sends its first command. Reads the SDK profile format
+  (`src/controllers/cart_profile.cpp`), validates it before connecting to the
+  robot, and logs the loaded K/D; `containers/compose.yml` passes
+  `FR3_INITIAL_CART_PROFILE` through (mount the profile into the container).
+  Unset keeps the previous behaviour. Requires a rebuilt daemon image. No PR has been opened
+  for this change.
+- `fr3_stack/configs/cartesian_impedance.sysid_stiff.yaml` (2026-10-14): a
+  Cartesian impedance profile for system-identification excitation and the
+  daemon boot hold: translation K 500, D = 2·√K (FrankaTwin's held-out gain); rotation K 20 with
+  damping lowered from 9 to 5, because 20/9 still excited a transient ~31 Hz J7
+  oscillation at chirp scale 0.4; nullspace stabilizer and target
+  interpolation/EMA stay at the defaults. FrankaTwin's rotational 30/10.95
+  drove this FR3 + XHand into a sustained 25 Hz J7 oscillation (~1 rad/s,
+  ~10 Nm) at chirp scales 0.1 and 0.2, with or without the nullspace term and
+  smoothing, and must not be used on this arm. At the default 200/20 a real
+  chirp run lagged the reference by 300-500 ms. Contact forces rise
+  accordingly. No PR has been opened for this change.
 - Independent `Robot.start_recording` / `stop_recording` / `recording_status`
   and `fr3-recording` CLI, with acknowledged Cap'n Proto REQ/REP on port 5557
   (`--recording-port`). Recording can be toggled without daemon restart or

@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 ArrayLike = Union[np.ndarray, Sequence[float]]
 
+# send_move_to peak joint-speed bound (rad/s). Default and ceiling match
+# FrankaTwin's reset.q_max_speed and kQMaxSpeedMax; the daemon enforces the
+# same ceiling.
+MOVE_TO_Q_MAX_SPEED_DEFAULT = 0.5
+MOVE_TO_Q_MAX_SPEED_MAX = 1.25
+
 # Back-compat alias for external scripts that imported the pre-split name.
 _SCHEMA = SCHEMA
 
@@ -319,16 +325,31 @@ class Robot:
         K_null:           float | None = None,
         D_null:           float | None = None,
         max_tau_null:     float | None = None,
+        q_max_speed:      float | None = MOVE_TO_Q_MAX_SPEED_DEFAULT,
     ) -> None:
-        """Min-jerk move to a Cartesian goal over ``run_time`` seconds.
+        """Min-jerk move to a Cartesian goal over at least ``run_time`` seconds.
 
         For resets / setup moves only — policy code should stream
         ``send_cartesian_impedance`` directly. Per-call gain overrides do NOT
         mutate the cart cache. Size ``run_time`` against ``|v|≈1.875·Δp/T``
         and ``|a|≈5.77·Δp/T²``; 1 s for ≤30 cm is usually safe.
+
+        ``q_max_speed`` (rad/s, default 0.5, at most 1.25) bounds the peak
+        joint speed as FrankaTwin's ``move_to`` does: the daemon lengthens the
+        move to ``≥ 1.875·max|Δq|/q_max_speed`` using a Jacobian estimate of
+        ``Δq`` at the start pose. The actual duration can therefore exceed
+        ``run_time``. ``None`` disables the bound.
         """
         if not (run_time > 0.0):
             raise ValueError(f"run_time must be > 0, got {run_time}")
+        if q_max_speed is None:
+            q_max_speed_eff = 0.0
+        else:
+            q_max_speed_eff = float(q_max_speed)
+            if not (0.0 < q_max_speed_eff <= MOVE_TO_Q_MAX_SPEED_MAX):
+                raise ValueError(
+                    f"q_max_speed must be in (0, {MOVE_TO_Q_MAX_SPEED_MAX}] rad/s "
+                    f"or None, got {q_max_speed}")
 
         c = self._cart_cache
         k_eff           = aslist(K,      6) if K      is not None else c["K"]
@@ -350,6 +371,7 @@ class Robot:
         mt.kNull          = K_null_eff
         mt.dNull          = D_null_eff
         mt.maxTauNull     = max_tau_null_eff
+        mt.qMaxSpeed      = q_max_speed_eff
         self._send(cmd)
 
     def send_joint_impedance(

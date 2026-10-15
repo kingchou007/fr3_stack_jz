@@ -46,6 +46,7 @@
 #include <fr3_stack/controllers/cartesian_impedance_controller.hpp>
 #include <fr3_stack/controllers/joint_impedance_controller.hpp>
 #include <fr3_stack/ring_log_capture.hpp>
+#include <fr3_stack/motion_generator.hpp>
 #include <fr3_stack/controllers/cartesian_admittance_controller.hpp>
 #include <fr3_stack/controllers/hybrid_force_motion_controller.hpp>
 
@@ -561,6 +562,56 @@ static void test_joint_log_capture() {
 // ============================================================================
 // CartesianAdmittanceController
 // ============================================================================
+// MinJerk q_max_speed: run_time stretches to 1.875·max|Δq|/q_max_speed
+// (FrankaTwin move_to semantics), never shrinks, and 0 disables the bound.
+// Final-stage torque clamp: FR3 limits 87×4 / 12×3 Nm, sign preserved.
+static void test_clamp_torque_fr3_limits() {
+    const std::array<double, 7> in  = {100, -100, 50, -87, 20, -20, 5};
+    const std::array<double, 7> out = clamp_torque(in);
+    const std::array<double, 7> exp = {87, -87, 50, -87, 12, -12, 5};
+    bool ok = true;
+    for (int i = 0; i < 7; ++i) ok = ok && out[i] == exp[i];
+    CHECK(ok, "clamp_torque: clips to 87/87/87/87/12/12/12 Nm");
+}
+
+static void test_min_jerk_joint_speed_stretch() {
+    // Jacobian whose first six joints map 1:1 onto the twist axes.
+    Eigen::Matrix<double, 6, 7> J = Eigen::Matrix<double, 6, 7>::Zero();
+    J.leftCols<6>().setIdentity();
+    const Eigen::Quaterniond qI = Eigen::Quaterniond::Identity();
+    const Eigen::Vector3d    p0 = Eigen::Vector3d::Zero();
+
+    MinJerkGenerator stretch(Eigen::Vector3d(0.3, 0, 0), qI, 0.5, 0.5);
+    stretch.start(p0, qI);
+    stretch.limit_joint_speed(J);
+    // Δq ≈ 0.3 rad (damping makes it marginally smaller) → T ≈ 1.125 s.
+    CHECK(std::abs(stretch.run_time() - 1.125) < 1e-3,
+          "min-jerk: translation stretches run_time to 1.875·Δq/v");
+
+    const Eigen::Quaterniond qz(Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()));
+    MinJerkGenerator rot(p0, qz, 0.5, 0.5);
+    rot.start(p0, qI);
+    rot.limit_joint_speed(J);
+    CHECK(std::abs(rot.run_time() - 1.875 * 0.4 / 0.5) < 1e-3,
+          "min-jerk: rotation stretches run_time via the angular rows");
+
+    MinJerkGenerator keep(Eigen::Vector3d(0.01, 0, 0), qI, 2.0, 0.5);
+    keep.start(p0, qI);
+    keep.limit_joint_speed(J);
+    CHECK(keep.run_time() == 2.0, "min-jerk: run_time is never shortened");
+
+    MinJerkGenerator off(Eigen::Vector3d(0.3, 0, 0), qI, 0.5, 0.0);
+    off.start(p0, qI);
+    off.limit_joint_speed(J);
+    CHECK(off.run_time() == 0.5, "min-jerk: q_max_speed 0 disables the bound");
+
+    // Trajectory still ends exactly on the goal after stretching.
+    for (int i = 0; i < 1200; ++i) stretch.step(0.001);
+    CHECK(stretch.finished(), "min-jerk: stretched trajectory finishes");
+    CHECK((stretch.step(0.001).pos - Eigen::Vector3d(0.3, 0, 0)).norm() < 1e-12,
+          "min-jerk: stretched trajectory ends at goal");
+}
+
 static void test_admittance_external_wrench() {
     section("CartesianAdmittance: F_ext drives inner; outer pulls robot along");
     franka::RobotState s; set_identity_pose(s); set_q_safe(s);
@@ -1023,6 +1074,9 @@ int main() {
     test_joint_imp_equilibrium();
     test_joint_imp_damping();
     test_joint_log_capture();
+
+    test_clamp_torque_fr3_limits();
+    test_min_jerk_joint_speed_stretch();
 
     test_admittance_external_wrench();
 

@@ -31,10 +31,20 @@ Modes are `idle`, `cart`, `joint`, `adm`, and `hybrid`. For a non-idle initial c
 | `--cmd-port`             | 5555         | workstation→NUC commands                         |
 | `--state-port`           | 5556         | NUC→workstation state (~200 Hz)                  |
 | `--initial-controller`   | `idle`       | `idle` \| `cartesian_impedance` \| `hybrid` |
+| `--initial-cart-profile` | empty        | Cartesian profile YAML (SDK format) for the `up cart` boot hold; empty = built-in 200/20 |
 | `--ft-sensor-kind`       | empty        | currently only `bota`                            |
 | `--ft-sensor-config`     | empty        | Bota: path to driver JSON                        |
 
 Shorthands: `--idle`, `--cart`, `--hybrid`.
+
+Without `--initial-cart-profile`, a freshly started `cartesian_impedance`
+daemon holds with the built-in K 200/20 until a client sends its own gains. Set
+`FR3_INITIAL_CART_PROFILE` to the container path of a profile YAML (mount it
+into the container) to boot with that profile instead, for example
+`cartesian_impedance.sysid_stiff.yaml` from `fr3_stack/configs/`.
+
+The daemon validates the file before connecting to the robot and refuses to
+start on an invalid profile; the boot log prints the loaded K and D.
 
 ### Compose env vars
 

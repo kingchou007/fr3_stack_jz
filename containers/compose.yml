@@ -59,6 +59,7 @@ services:
           --state-port         "$$FR3_STATE_PORT" \
           --recording-port     "$$FR3_RECORDING_PORT" \
           --initial-controller "$$FR3_INITIAL_CONTROLLER" \
+          $${FR3_INITIAL_CART_PROFILE:+--initial-cart-profile "$$FR3_INITIAL_CART_PROFILE"} \
           $${FR3_FT_SENSOR_KIND:+--ft-sensor-kind "$$FR3_FT_SENSOR_KIND"} \
           $${FR3_FT_SENSOR_CONFIG:+--ft-sensor-config "$$FR3_FT_SENSOR_CONFIG"} \
           $${FR3_FT_CONTROLLERS_RAW:+--ft-controllers-raw}
@@ -68,6 +69,9 @@ services:
       FR3_STATE_PORT:         "${FR3_STATE_PORT:-5556}"
       FR3_RECORDING_PORT:     "${FR3_RECORDING_PORT:-5557}"
       FR3_INITIAL_CONTROLLER: "${FR3_INITIAL_CONTROLLER:-idle}"
+      # Container path of a Cartesian profile YAML for the boot hold of
+      # `up cart`; empty keeps the daemon's built-in 200/20 gains.
+      FR3_INITIAL_CART_PROFILE: "${FR3_INITIAL_CART_PROFILE:-}"
       FR3_FT_SENSOR_KIND:     "${FR3_FT_SENSOR_KIND:-}"
       FR3_FT_SENSOR_CONFIG:   "${FR3_FT_SENSOR_CONFIG:-}"
       FR3_FT_CONTROLLERS_RAW: "${FR3_FT_CONTROLLERS_RAW:-}"

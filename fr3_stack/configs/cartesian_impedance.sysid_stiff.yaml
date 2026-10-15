@@ -1,0 +1,30 @@
+# Stiffer Cartesian impedance profile for system-identification excitation.
+#
+# Translation is stiffened to FrankaTwin's held-out kp_pos 500 (D = 2 sqrt(K)),
+# where the default 200 lagged the chirp by 300-500 ms. Rotation stays at the
+# stack default 20 / 9: with FrankaTwin's kp_ori 30 / kd 10.95, this FR3 + XHand
+# went into a 25 Hz oscillation dominated by J7 (|dq7| ~1 rad/s, ~10 Nm) once
+# J7 moved faster than ~0.1 rad/s, both with and without the nullspace
+# stabilizer and target smoothing (2026-10-14, scale 0.1 and 0.2 chirps).
+# The torque slew limit was not saturated (J7 <= ~270 Nm/s at onset).
+# Rotational damping is lowered from the default 9 to 5: at 20 / 9 a scale-0.4
+# chirp still excited a transient ~31 Hz J7 oscillation (J7 high-frequency
+# rms 0.17 rad/s) once J7 turned faster than ~0.4 rad/s. J7's velocity
+# feedback comes mainly from the rotational D.
+# Contact forces rise with K: a 3 cm error pushes with ~15 N.
+
+K: [500.0, 500.0, 500.0,  20.0,  20.0,  20.0]
+D: [44.72135955, 44.72135955, 44.72135955, 5.0, 5.0, 5.0]
+
+q_null: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+K_null: 100.0
+D_null: 0.0          # auto = 2 sqrt(K_null) = 20
+max_tau_null: 0.0
+
+filter_alpha: 0.05
+linear_interp: true
+ema:           true
+
+target_wrench: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+max_delta: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+use_friction: false

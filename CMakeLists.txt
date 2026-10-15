@@ -66,6 +66,7 @@ if(FR3_BUILD_DAEMON)
         src/sensors/bota/bota_wrench_source.cpp
         src/sensors/compensated_wrench_source.cpp
         src/sensors/payload_calib.cpp
+        src/controllers/cart_profile.cpp
         ${CAPNP_GEN_SRCS}
         ${CAPNP_GEN_HDRS})  # listed so parallel builds wait for header gen
     target_include_directories(fr3-stack PRIVATE
@@ -173,6 +174,20 @@ if(FR3_BUILD_TESTS)
     add_test(NAME recording COMMAND test_recording)
 
     if(FR3_BUILD_DAEMON)
+        # --initial-cart-profile loader against the SDK's profile YAMLs. The
+        # container build context has no fr3_stack/, so only register it when
+        # the profiles are present (workstation checkouts).
+        if(EXISTS ${CMAKE_SOURCE_DIR}/fr3_stack/configs/cartesian_impedance.sysid_stiff.yaml)
+            add_executable(test_cart_profile tests/cpp/test_cart_profile.cpp
+                src/controllers/cart_profile.cpp)
+            target_include_directories(test_cart_profile PRIVATE
+                ${CMAKE_SOURCE_DIR}/tests/cpp/franka_mock ${CMAKE_SOURCE_DIR}/include)
+            target_compile_definitions(test_cart_profile PRIVATE
+                FR3_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+            target_link_libraries(test_cart_profile PRIVATE Eigen3::Eigen yaml-cpp)
+            add_test(NAME cart_profile COMMAND test_cart_profile)
+        endif()
+
         # Hardware-free REP service harness for Python/C++ wire integration tests.
         add_executable(recording_test_server tests/cpp/recording_test_server.cpp
             src/recording.cpp src/recording_server.cpp src/ring_log_writer.cpp

@@ -265,6 +265,10 @@ struct MoveToCmd {
     dNull           @7 :Float64;
     # Per-joint nullspace τ clip. 0 ⇒ no clip. See CartesianImpedanceCmd.maxTauNull.
     maxTauNull      @8 :Float64;
+    # Peak joint-speed bound (rad/s), FrankaTwin move_to semantics: the daemon
+    # stretches runTime to ≥ 1.875·max|Δq|/qMaxSpeed, with Δq ≈ J⁺·Δx
+    # estimated at activation. 0 ⇒ no bound (pre-field clients). Max 1.25.
+    qMaxSpeed       @9 :Float64;
 }
 
 struct Command {

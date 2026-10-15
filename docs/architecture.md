@@ -68,4 +68,6 @@ fr3-stack/
 - **Wire strings are stable.** The capnp union arm names are the contract — internal C++ class names can move freely.
 - **`include/` = declarations; `src/` = implementations.** Templates and small inline helpers in headers are the exceptions.
 - **Templated, RT-safe utilities.** Anything called inside the libfranka callback uses fixed-size Eigen and templates — no heap allocations per tick.
-- **Torque rate limit.** The final stage clamps $|\Delta\tau| \le 1\;\text{N·m/ms}$ regardless of which controller is active, so target steps and controller switches never hit the motor driver as raw discontinuities.
+- **Torque limit.** The final stage first clamps each joint's commanded torque to the FR3 limits 87/87/87/87/12/12/12 N·m (`kFr3TauMax`), as FrankaTwin does.
+- **Torque rate limit.** The final stage clamps $|\Delta\tau| \le 0.8\;\text{N·m/ms}$ (800 N·m/s) regardless of which controller is active, so target steps and controller switches never hit the motor driver as raw discontinuities.
+- **Collision reflex.** At startup the daemon calls `setCollisionBehavior` with 100 N·m on every joint and 100 N / N·m on every Cartesian axis (lower and upper, nominal and acceleration), matching FrankaTwin's sysid setup (previously 80). Higher thresholds let the arm push harder into a contact before the reflex stops it.
